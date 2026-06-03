@@ -347,3 +347,7 @@ config HAVE_LIMITED_CODE_SIZE
     bool
 config HAVE_SOFTWARE_DIVIDE_REQUIRED
     bool
+
+config YUMI_CONFIG
+    string "Yumi machine descriptor"
+    default ""
