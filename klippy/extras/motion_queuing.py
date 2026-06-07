@@ -26,6 +26,8 @@ class PrinterMotionQueuing:
         self.reactor = printer.get_reactor()
         # C trapq tracking
         self.trapqs = []
+        # YUMI: per-trapq extruder lead time (anticipation), keyed by trapq addr
+        self.trapq_leads = {}
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq_finalize_moves = ffi_lib.trapq_finalize_moves
         # C steppersync tracking
@@ -71,6 +73,22 @@ class PrinterMotionQueuing:
     def lookup_trapq_append(self):
         ffi_main, ffi_lib = chelper.get_ffi()
         return ffi_lib.trapq_append
+    # YUMI: extruder lead time (anticipation) tracking, keyed by trapq address.
+    # The lead belongs to the motion queue (trapq); synced extruder_steppers
+    # share that trapq and therefore inherit the lead automatically.
+    def trapq_addr(self, trapq):
+        ffi_main, ffi_lib = chelper.get_ffi()
+        return int(ffi_main.cast("uintptr_t", trapq))
+    def set_trapq_lead(self, trapq, lead_time):
+        addr = self.trapq_addr(trapq)
+        if lead_time:
+            self.trapq_leads[addr] = lead_time
+        else:
+            self.trapq_leads.pop(addr, None)
+    def get_trapq_lead(self, trapq):
+        if trapq is None:
+            return 0.
+        return self.trapq_leads.get(self.trapq_addr(trapq), 0.)
     # C steppersync tracking
     def _lookup_steppersync(self, mcu):
         for ss_mcu, ss in self.steppersyncs:
@@ -134,7 +152,13 @@ class PrinterMotionQueuing:
                 continue
             pre_active = ffi_lib.itersolve_get_gen_steps_pre_active(sk)
             post_active = ffi_lib.itersolve_get_gen_steps_post_active(sk)
-            kin_flush_delay = max(kin_flush_delay, pre_active, post_active)
+            # YUMI: the extruder trapq content is shifted earlier by `lead`, so
+            # the trapq must stay valid `lead` further out. Grow the scan window
+            # (kin_flush_delay / lookahead) instead of widening calc_position.
+            lead = self.trapq_leads.get(
+                int(ffi_main.cast("uintptr_t", trapq)), 0.)
+            kin_flush_delay = max(kin_flush_delay, pre_active, post_active,
+                                  lead + pre_active, lead + post_active)
         self.kin_flush_delay = kin_flush_delay
     # Flush tracking
     def _handle_shutdown(self):

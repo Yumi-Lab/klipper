@@ -11,6 +11,9 @@ class ExtruderStepper:
         self.printer = config.get_printer()
         self.name = config.get_name().split()[-1]
         self.pressure_advance = self.pressure_advance_smooth_time = 0.
+        # YUMI: smooth_time actually loaded in the kinematics (may be active
+        # because of lead_time even when pressure_advance == 0).
+        self._applied_smooth = 0.
         self.config_pa = config.getfloat('pressure_advance', 0., minval=0.)
         self.config_smooth_time = config.getfloat(
                 'pressure_advance_smooth_time', 0.040, above=0., maxval=.200)
@@ -41,9 +44,37 @@ class ExtruderStepper:
     def _handle_connect(self):
         self._set_pressure_advance(self.config_pa, self.config_smooth_time)
     def get_status(self, eventtime):
+        motion_queuing = self.printer.lookup_object('motion_queuing')
+        lead_time = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
         return {'pressure_advance': self.pressure_advance,
                 'smooth_time': self.pressure_advance_smooth_time,
+                'lead_time': lead_time,
                 'motion_queue': self.motion_queue}
+    def _cur_lead(self):
+        mq = self.printer.lookup_object('motion_queuing')
+        return mq.get_trapq_lead(self.stepper.get_trapq())
+    def _set_lead_time(self, gcmd, lead_time):
+        # YUMI: lead belongs to the motion queue (trapq); apply it to whatever
+        # trapq this stepper is currently bound to. Synced feeders share it.
+        strapq = self.stepper.get_trapq()
+        if strapq is None:
+            gcmd.respond_info("Extruder stepper '%s' not bound to a motion "
+                              "queue; LEAD_TIME ignored" % (self.name,))
+            return
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.flush_step_generation()
+        motion_queuing = self.printer.lookup_object('motion_queuing')
+        motion_queuing.set_trapq_lead(strapq, lead_time)
+        # YUMI: a lead can enable (or disable) smoothing even when PA==0, so the
+        # smooth_time works WITH the lead without needing a fake tiny PA.
+        new_smooth = (self.pressure_advance_smooth_time
+                      if (self.pressure_advance or lead_time) else 0.)
+        if new_smooth != self._applied_smooth:
+            ffi_main, ffi_lib = chelper.get_ffi()
+            ffi_lib.extruder_set_pressure_advance(
+                    self.sk_extruder, 0., self.pressure_advance, new_smooth)
+            self._applied_smooth = new_smooth
+        motion_queuing.check_step_generation_scan_windows()
     def find_past_position(self, print_time):
         mcu_pos = self.stepper.get_past_mcu_position(print_time)
         return self.stepper.mcu_to_commanded_position(mcu_pos)
@@ -65,19 +96,18 @@ class ExtruderStepper:
         self.motion_queue = extruder_name
         motion_queuing.check_step_generation_scan_windows()
     def _set_pressure_advance(self, pressure_advance, smooth_time):
-        old_smooth_time = self.pressure_advance_smooth_time
-        if not self.pressure_advance:
-            old_smooth_time = 0.
-        new_smooth_time = smooth_time
-        if not pressure_advance:
-            new_smooth_time = 0.
+        # YUMI: smoothing is active when PA>0 OR a lead is set on this trapq, so
+        # smooth_time works at PA=0 alongside lead_time (no fake tiny PA needed).
+        lead = self._cur_lead()
+        new_smooth_time = smooth_time if (pressure_advance or lead) else 0.
         toolhead = self.printer.lookup_object("toolhead")
         ffi_main, ffi_lib = chelper.get_ffi()
         espa = ffi_lib.extruder_set_pressure_advance
-        if new_smooth_time != old_smooth_time:
+        if new_smooth_time != self._applied_smooth:
             # Need full kinematic flush to change the smooth time
             toolhead.flush_step_generation()
             espa(self.sk_extruder, 0., pressure_advance, new_smooth_time)
+            self._applied_smooth = new_smooth_time
             motion_queuing = self.printer.lookup_object('motion_queuing')
             motion_queuing.check_step_generation_scan_windows()
         else:
@@ -102,9 +132,15 @@ class ExtruderStepper:
                                      self.pressure_advance_smooth_time,
                                      minval=0., maxval=.200)
         self._set_pressure_advance(pressure_advance, smooth_time)
+        lead_time = gcmd.get_float('LEAD_TIME', None, minval=0., maxval=0.5)
+        if lead_time is not None:
+            self._set_lead_time(gcmd, lead_time)
+        motion_queuing = self.printer.lookup_object('motion_queuing')
+        cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
         msg = ("pressure_advance: %.6f\n"
-               "pressure_advance_smooth_time: %.6f"
-               % (pressure_advance, smooth_time))
+               "pressure_advance_smooth_time: %.6f\n"
+               "lead_time: %.6f"
+               % (pressure_advance, smooth_time, cur_lead))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
@@ -173,6 +209,18 @@ class PrinterExtruder:
         self.motion_queuing = self.printer.load_object(config, 'motion_queuing')
         self.trapq = self.motion_queuing.allocate_trapq()
         self.trapq_append = self.motion_queuing.lookup_trapq_append()
+        # YUMI: extruder lead time (pure anticipation / coast). The lead shifts
+        # the trapq content earlier in time at planner level (see process_move);
+        # it is NOT a kin_extruder.c / calc_position change. Cache the trapq
+        # address so process_move reads the live lead with one dict lookup.
+        self._trapq_addr = self.motion_queuing.trapq_addr(self.trapq)
+        config_lead = config.getfloat('lead_time', 0., minval=0., maxval=0.5)
+        if config_lead:
+            self.motion_queuing.set_trapq_lead(self.trapq, config_lead)
+            # Refresh step-generation scan windows once syncemitters exist
+            self.printer.register_event_handler(
+                "klippy:connect",
+                lambda: self.motion_queuing.check_step_generation_scan_windows())
         # Setup extruder stepper
         self.extruder_stepper = None
         if (config.get('step_pin', None) is not None
@@ -246,8 +294,12 @@ class PrinterExtruder:
         can_pressure_advance = False
         if axis_r > 0. and (move.axes_d[0] or move.axes_d[1]):
             can_pressure_advance = True
+        # YUMI: shift the extruder trapq content earlier by the lead time so the
+        # extruder finishes pushing `lead` before the toolhead stops (coast).
+        # Positions are untouched; only the time base of the E trapq moves.
+        lead = self.motion_queuing.trapq_leads.get(self._trapq_addr, 0.)
         # Queue movement (x is extruder movement, y is pressure advance flag)
-        self.trapq_append(self.trapq, print_time,
+        self.trapq_append(self.trapq, print_time - lead,
                           move.accel_t, move.cruise_t, move.decel_t,
                           move.start_pos[ea_index], 0., 0.,
                           1., can_pressure_advance, 0.,
