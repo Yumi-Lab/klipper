@@ -351,3 +351,7 @@ config HAVE_SOFTWARE_DIVIDE_REQUIRED
 config YUMI_CONFIG
     string "Yumi machine descriptor"
     default ""
+
+config YUMI_COMMENT
+    string "Yumi build comment"
+    default ""
