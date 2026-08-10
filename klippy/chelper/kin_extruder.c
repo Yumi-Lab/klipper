@@ -119,7 +119,46 @@ struct extruder_stepper {
     struct stepper_kinematics sk;
     struct list_head pa_list;
     double half_smooth_time, inv_half_smooth_time2;
+    // YUMI: bowden charge layer (see comment above charge_lookahead)
+    double charge_coef, charge_window;
 };
+
+// YUMI -- BOWDEN CHARGE LAYER
+//
+// On a bowden the filament column is elastic: it stores material on the way in
+// and gives it back on the way out. Pressure advance compensates that with an
+// INSTANTANEOUS term (pa * velocity), which demands an unbounded motor rate as
+// the tube -- and therefore the time constant -- grows.
+//
+// The charge layer is the same compensation SPREAD over a window T_c:
+//     charge_position(t) = coef * (nominal_position(t + T_c) - nominal_position(t))
+//
+// It is a strictly additive layer: coef = 0 (or T_c = 0) leaves every existing
+// path untouched, bit for bit. On a cruise segment it delivers coef * v * T_c,
+// so T_c -> 0 degenerates to plain pressure advance of value coef*T_c, while
+// T_c = tau reproduces lead_time. The motor peak is bounded by
+// feed_rate * (1 + coef) instead of growing without limit.
+//
+// The window is set from a DISTANCE and a SPEED (T_c = dist / speed) because
+// that is what an operator can measure on a machine; seconds never appear in
+// the user-facing command.
+//
+// It reads the NOMINAL trajectory, not the pressure-advanced one: the two
+// layers compensate different physics and must not feed each other.
+static double
+charge_lookahead(struct move *m, double move_time, double window)
+{
+    // Nominal extruder position at move_time + window, walking forward through
+    // the queue exactly as pa_range_integrate does. itersolve guarantees the
+    // moves are present because gen_steps_post_active covers the window (see
+    // extruder_update_scan_window); the trapq sentinel move terminates the walk.
+    double t = move_time + window;
+    while (unlikely(t > m->move_t)) {
+        t -= m->move_t;
+        m = list_next_entry(m, node);
+    }
+    return m->start_pos.x + move_get_distance(m, t);
+}
 
 static double
 extruder_calc_position(struct stepper_kinematics *sk, struct move *m
@@ -127,12 +166,46 @@ extruder_calc_position(struct stepper_kinematics *sk, struct move *m
 {
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     double hst = es->half_smooth_time;
-    if (!hst)
+    double pos;
+    if (!hst) {
         // Pressure advance not enabled
-        return m->start_pos.x + move_get_distance(m, move_time);
-    // Apply pressure advance and average over smooth_time
-    double area = pa_range_integrate(m, move_time, &es->pa_list, hst);
-    return m->start_pos.x + area * es->inv_half_smooth_time2;
+        pos = m->start_pos.x + move_get_distance(m, move_time);
+    } else {
+        // Apply pressure advance and average over smooth_time
+        double area = pa_range_integrate(m, move_time, &es->pa_list, hst);
+        pos = m->start_pos.x + area * es->inv_half_smooth_time2;
+    }
+    // YUMI: additive bowden charge layer -- neutral when coef or window is zero
+    if (es->charge_coef && es->charge_window) {
+        double nominal = m->start_pos.x + move_get_distance(m, move_time);
+        double ahead = charge_lookahead(m, move_time, es->charge_window);
+        pos += es->charge_coef * (ahead - nominal);
+    }
+    return pos;
+}
+
+// YUMI: the scan window itersolve must keep populated -- the smoothing needs
+// half_smooth_time on both sides, the charge needs charge_window ahead. Written
+// in ONE place so the two layers cannot disagree about what they require.
+static void
+extruder_update_scan_window(struct extruder_stepper *es)
+{
+    double hst = es->half_smooth_time;
+    double post = hst;
+    if (es->charge_coef && es->charge_window > post)
+        post = es->charge_window;
+    es->sk.gen_steps_pre_active = hst;
+    es->sk.gen_steps_post_active = post;
+}
+
+void __visible
+extruder_set_charge(struct stepper_kinematics *sk, double charge_coef
+                    , double charge_window)
+{
+    struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
+    es->charge_coef = charge_coef;
+    es->charge_window = charge_window;
+    extruder_update_scan_window(es);
 }
 
 void __visible
@@ -142,7 +215,8 @@ extruder_set_pressure_advance(struct stepper_kinematics *sk, double print_time
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     double hst = smooth_time * .5, old_hst = es->half_smooth_time;
     es->half_smooth_time = hst;
-    es->sk.gen_steps_pre_active = es->sk.gen_steps_post_active = hst;
+    // YUMI: the charge layer also claims a forward window -- one writer
+    extruder_update_scan_window(es);
 
     // Cleanup old pressure advance parameters
     double cleanup_time = sk->last_flush_time - (old_hst > hst ? old_hst : hst);

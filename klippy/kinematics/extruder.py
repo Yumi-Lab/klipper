@@ -6,6 +6,11 @@
 import math, logging
 import stepper, chelper
 
+# YUMI: bounds of the bowden charge layer, written once and reused by the
+# config reader and the gcode command so they cannot drift apart.
+CHARGE_COEF_MAX = 4.
+CHARGE_WINDOW_MAX = 2.
+
 class ExtruderStepper:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -17,6 +22,13 @@ class ExtruderStepper:
         self.config_pa = config.getfloat('pressure_advance', 0., minval=0.)
         self.config_smooth_time = config.getfloat(
                 'pressure_advance_smooth_time', 0.040, above=0., maxval=.200)
+        # YUMI: bowden charge layer -- set from a DISTANCE (mm) and a SPEED
+        # (mm/s) because that is what is measurable on a machine; the window
+        # T_c = dist/speed is derived, never typed. Neutral while coef is 0.
+        self.charge_dist = config.getfloat('charge_dist', 0., minval=0.)
+        self.charge_speed = config.getfloat('charge_speed', 45., above=0.)
+        self.charge_coef = config.getfloat('charge_coef', 0., minval=0.,
+                                           maxval=CHARGE_COEF_MAX)
         # Setup stepper
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -43,13 +55,40 @@ class ExtruderStepper:
                                    desc=self.cmd_SYNC_EXTRUDER_MOTION_help)
     def _handle_connect(self):
         self._set_pressure_advance(self.config_pa, self.config_smooth_time)
+        self._set_charge(self.charge_dist, self.charge_speed, self.charge_coef)
     def get_status(self, eventtime):
         motion_queuing = self.printer.lookup_object('motion_queuing')
         lead_time = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
         return {'pressure_advance': self.pressure_advance,
                 'smooth_time': self.pressure_advance_smooth_time,
                 'lead_time': lead_time,
+                'charge_dist': self.charge_dist,
+                'charge_speed': self.charge_speed,
+                'charge_coef': self.charge_coef,
+                'charge_window': self._charge_window(),
                 'motion_queue': self.motion_queue}
+    def _charge_window(self):
+        # YUMI: the window is DERIVED (T_c = dist / speed), never stored -- one
+        # source of truth, so the three settings cannot describe two windows.
+        if self.charge_speed <= 0.:
+            return 0.
+        return self.charge_dist / self.charge_speed
+    def _set_charge(self, charge_dist, charge_speed, charge_coef):
+        # YUMI: additive layer -- coef 0 (or a null window) restores the stock
+        # path exactly, so this is safe to leave configured and switch off.
+        self.charge_dist = charge_dist
+        self.charge_speed = charge_speed
+        self.charge_coef = charge_coef
+        window = self._charge_window()
+        if window > CHARGE_WINDOW_MAX:
+            window = CHARGE_WINDOW_MAX
+        toolhead = self.printer.lookup_object("toolhead")
+        # Changing the scan window needs a full kinematic flush, like smoothing.
+        toolhead.flush_step_generation()
+        ffi_main, ffi_lib = chelper.get_ffi()
+        ffi_lib.extruder_set_charge(self.sk_extruder, charge_coef, window)
+        motion_queuing = self.printer.lookup_object('motion_queuing')
+        motion_queuing.check_step_generation_scan_windows()
     def _cur_lead(self):
         mq = self.printer.lookup_object('motion_queuing')
         return mq.get_trapq_lead(self.stepper.get_trapq())
@@ -135,12 +174,26 @@ class ExtruderStepper:
         lead_time = gcmd.get_float('LEAD_TIME', None, minval=0., maxval=0.5)
         if lead_time is not None:
             self._set_lead_time(gcmd, lead_time)
+        # YUMI: bowden charge -- three settings tunable LIVE, so the amount can
+        # be corrected mid-print on the first calibration runs.
+        c_dist = gcmd.get_float('CHARGE_DIST', self.charge_dist, minval=0.)
+        c_speed = gcmd.get_float('CHARGE_SPEED', self.charge_speed, above=0.)
+        c_coef = gcmd.get_float('CHARGE_COEF', self.charge_coef, minval=0.,
+                                maxval=CHARGE_COEF_MAX)
+        if (c_dist, c_speed, c_coef) != (self.charge_dist, self.charge_speed,
+                                         self.charge_coef):
+            self._set_charge(c_dist, c_speed, c_coef)
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
         msg = ("pressure_advance: %.6f\n"
                "pressure_advance_smooth_time: %.6f\n"
-               "lead_time: %.6f"
-               % (pressure_advance, smooth_time, cur_lead))
+               "lead_time: %.6f\n"
+               "charge_dist: %.3f mm\n"
+               "charge_speed: %.3f mm/s\n"
+               "charge_coef: %.6f\n"
+               "charge_window: %.6f s"
+               % (pressure_advance, smooth_time, cur_lead, self.charge_dist,
+                  self.charge_speed, self.charge_coef, self._charge_window()))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"

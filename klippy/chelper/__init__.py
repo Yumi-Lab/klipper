@@ -160,6 +160,8 @@ defs_kin_extruder = """
     void extruder_stepper_free(struct stepper_kinematics *sk);
     void extruder_set_pressure_advance(struct stepper_kinematics *sk
         , double print_time, double pressure_advance, double smooth_time);
+    void extruder_set_charge(struct stepper_kinematics *sk
+        , double charge_coef, double charge_window);
 """
 
 defs_kin_shaper = """
