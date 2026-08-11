@@ -37,15 +37,20 @@ SET_PRESSURE_ADVANCE SMOOTH_TIME=0.03 ADVANCE=0.1
 SET_PRESSURE_ADVANCE EXTRUDER=my_extra_stepper SMOOTH_TIME=0.03 ADVANCE=0.1
 G1 X50 Y50 E10.0
 
-# YUMI: bowden charge layer -- additive, neutral while coef is 0
-SET_PRESSURE_ADVANCE ADVANCE=0.05 CHARGE_DIST=36 CHARGE_SPEED=45 CHARGE_COEF=0.8
+# YUMI: bowden backlash take-up -- geometry declared, play deduced
+SET_PRESSURE_ADVANCE ADVANCE=0.05 BOWDEN_LENGTH=800 BACKLASH_COEF=1
 G1 X35 Y35 E8.5
-# Correct the amount live, as during a first calibration run
-SET_PRESSURE_ADVANCE CHARGE_COEF=0.4
-G1 X40 Y40 E9.0
-# Charge alongside a lead, both active at once
-SET_PRESSURE_ADVANCE ADVANCE=0 SMOOTH_TIME=0.04 LEAD_TIME=0.03 CHARGE_COEF=0.6
-G1 X45 Y45 E9.5
-# Switch the layer off -- must restore the stock path exactly
-SET_PRESSURE_ADVANCE CHARGE_COEF=0
-G1 X50 Y50 E10.0
+# A retraction and a travel: the reversal is where the take-up earns its keep
+G1 E7.5
+G1 X60 Y60
+G1 E8.5
+G1 X65 Y65 E9.0
+# Sweep the coefficient live, as during a calibration print
+SET_PRESSURE_ADVANCE BACKLASH_COEF=2
+G1 X70 Y70 E9.5
+# Alongside a lead, both active at once
+SET_PRESSURE_ADVANCE ADVANCE=0 SMOOTH_TIME=0.04 LEAD_TIME=0.03 BACKLASH_COEF=0.5
+G1 X75 Y75 E10.0
+# Off -- must restore the stock path exactly
+SET_PRESSURE_ADVANCE BACKLASH_COEF=0
+G1 X80 Y80 E10.5

@@ -9,7 +9,7 @@ fichier `.py` faite ailleurs (avant, yumi-config recopiait le patch — supprim�
 Les patches sont **côté host** — **aucun flash MCU**, jamais. Sur le pad :
 `git pull` + `systemctl restart klipper`, c'est tout.
 
-⚠️ **Depuis la couche CHARGE, `kin_extruder.c` n'est plus stock.** Ce fichier est du
+⚠️ **Depuis le rattrapage de jeu, `kin_extruder.c` n'est plus stock.** Ce fichier est du
 C **hôte** (`klippy/chelper/`, compilé dans `c_helper.so`), pas du firmware MCU.
 Klipper le **recompile tout seul** au démarrage quand la source est plus récente
 que la bibliothèque : le premier `systemctl restart klipper` après un `git pull`
@@ -46,7 +46,7 @@ xxxxxxx Add YUMI_CONFIG build-time constant
 Chaque ligne ajoutée par Yumi est marquée `# YUMI:` :
 ```bash
 grep -rn "# YUMI:" klippy/      # patches Python
-grep -rn "// YUMI" klippy/chelper/  # couche CHARGE (C hôte)
+grep -rn "// YUMI" klippy/chelper/  # rattrapage de jeu (C hôte)
 ```
 
 ---
@@ -56,36 +56,46 @@ grep -rn "// YUMI" klippy/chelper/  # couche CHARGE (C hôte)
 | Patch | Fichiers | Type |
 |---|---|---|
 | **extruder lead_time** (anticipation / coast) | `klippy/kinematics/extruder.py`, `klippy/extras/motion_queuing.py` | core patché, pur-Python |
-| **couche CHARGE bowden** | `klippy/chelper/kin_extruder.c`, `klippy/chelper/__init__.py`, `klippy/kinematics/extruder.py` | core patché, **C hôte** |
+| **rattrapage de jeu bowden** | `klippy/chelper/kin_extruder.c`, `klippy/chelper/__init__.py`, `klippy/kinematics/extruder.py` | core patché, **C hôte** |
 | **YUMI_CONFIG** (constante gravée au build, lue host-side via mcu_constants) | firmware build | constante |
 
-### Ce que fait la couche CHARGE
-Sur un bowden, la colonne de filament est élastique : elle emmagasine de la matière
-à l'aller et la rend au retour. Le pressure advance compense ça par un terme
-**instantané** (`pa × vitesse`), qui exige une vitesse moteur d'autant plus grande
-que le tube — donc la constante de temps — est long.
+### Ce que fait le rattrapage de jeu
+Dans un bowden courbé, le filament comprimé s'appuie sur la paroi extérieure et,
+en traction, sur l'intérieure. Toute inversion coûte donc une **course morte** :
 
-La charge est la même compensation **étalée** sur une fenêtre `T_c` :
+    jeu = (diamètre intérieur − diamètre filament) × courbure totale
 
-    charge(t) = coef × ( position_nominale(t + T_c) − position_nominale(t) )
+Tant qu'elle n'est pas parcourue, ADVANCE, SMOOTH_TIME et LEAD_TIME poussent dans
+le vide : leur consigne est avalée par le jeu et n'atteint jamais la colonne.
+C'est un **activateur**, pas un compensateur — seul il ne dépose rien.
 
-- Couche **strictement additive** : `CHARGE_COEF=0` (ou une fenêtre nulle) rend le
-  chemin d'origine **bit pour bit**. On peut donc la laisser configurée et éteinte.
-- En croisière elle délivre `coef × v × T_c`. `T_c → 0` dégénère en pressure advance
-  de valeur `coef × T_c` ; `T_c = τ` reproduit `lead_time`. Ce ne sont pas trois
-  méthodes rivales mais une seule famille.
-- Pointe moteur bornée à `débit × (1 + coef)` au lieu de croître sans limite.
-- Elle lit la trajectoire **nominale**, pas celle du pressure advance : les deux
-  couches compensent des physiques différentes et ne doivent pas se nourrir l'une
-  l'autre.
-- Réglée par une **distance** (mm) et une **vitesse** (mm/s), jamais par un temps :
-  `T_c = CHARGE_DIST / CHARGE_SPEED`. C'est ce qu'un opérateur sait mesurer sur une
-  machine. Les trois paramètres se changent **en direct** par
-  `SET_PRESSURE_ADVANCE`, pour corriger l'amplitude en cours d'essai.
+La couche parcourt ce jeu **en avance**, de sorte qu'il soit refermé exactement
+quand la vraie extrusion commence. C'est un lead qui ne décale que le **bord** de
+la pente, pas la pente entière, et de la distance du jeu et non d'un temps.
 
-Modèle validé dans `docs/lead-time-simulator.html` (dépôt YumiOS-Klipper-V2), et
-conformité du firmware au modèle vérifiée par un banc C autonome (25 contrôles).
-**τ n'est mesuré sur aucune machine à ce jour** : le coefficient se cale à l'essai.
+- L'opérateur déclare une **géométrie**, jamais un jeu : `bowden_length` (0 =
+  couche éteinte, c'est le défaut) et `bowden_id`. Le reste se déduit.
+- `backlash_coef` est le bouton d'expérimentation : il multiplie le jeu calculé
+  (2 le double, 0,5 le divise), se règle **en direct** comme le flow.
+- `bowden_turns` (défaut 1) est l'hypothèse de routage, déclarée et non cachée.
+  Le nombre de coudes d'un cheminement **ne croît pas avec la longueur** — c'est
+  pourquoi la longueur ne fait que plafonner θ, jamais le fixer.
+- La rampe dure `jeu / backlash_speed`, soit ~13 ms : très en deçà des 100 ms que
+  le lissage réclame couramment. Une rampe plus longue est **refusée avec un
+  message**, jamais rognée en silence.
+
+**Le sens est horodaté par le planner**, pas deviné par la cinématique : une
+fonction de position n'a pas de mémoire, et après une pause elle ne peut plus
+savoir d'où vient le filament sans lire des moves peut-être déjà libérés — la
+faute exacte qui produit « Invalid sequence ». `process_move` voit les mouvements
+dans l'ordre, donc il sait ; il empile un jalon comme le fait `pa_list`.
+
+Conformité vérifiée par un banc C autonome (14 contrôles) : neutralité à jeu nul,
+offset nul loin de l'inversion, rampe à mi-course, **valeur atteinte pile à
+l'instant de l'inversion**, maintien pendant la traction, et fenêtre réclamée.
+
+**Ni le jeu ni τ ne sont mesurés sur une machine à ce jour** : `backlash_coef` se
+cale à l'impression, c'est sa raison d'être.
 
 ### Ce que fait lead_time
 - `lead_time` (config `[extruder]` ou `SET_PRESSURE_ADVANCE EXTRUDER=... LEAD_TIME=`)
@@ -141,12 +151,12 @@ git diff upstream/master..master --stat   # doit rester nos fichiers + le delta 
 ```
 Puis test réel : une impression + 0 erreur sync watchdog.
 
-Vérifier aussi que la couche CHARGE est bien **neutre à zéro** — c'est ce qui
+Vérifier aussi que le rattrapage est bien **neutre à zéro** — c'est ce qui
 permet de la laisser en place sans risque :
 ```bash
 python3 scripts/test_klippy.py test/klippy/pressure_advance.test
 ```
-Le cas de test se termine par `CHARGE_COEF=0` suivi d'un mouvement : si le chemin
+Le cas de test se termine par `BACKLASH_COEF=0` suivi d'un mouvement : si le chemin
 d'origine n'est pas restauré exactement, ça se voit là.
 
 ---

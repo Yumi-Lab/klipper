@@ -119,45 +119,66 @@ struct extruder_stepper {
     struct stepper_kinematics sk;
     struct list_head pa_list;
     double half_smooth_time, inv_half_smooth_time2;
-    // YUMI: bowden charge layer (see comment above charge_lookahead)
-    double charge_coef, charge_window;
+    // YUMI: bowden backlash take-up (see comment below)
+    struct list_head bl_list;
+    double backlash_play, backlash_ramp;
 };
 
-// YUMI -- BOWDEN CHARGE LAYER
+// YUMI -- BOWDEN BACKLASH TAKE-UP
 //
-// On a bowden the filament column is elastic: it stores material on the way in
-// and gives it back on the way out. Pressure advance compensates that with an
-// INSTANTANEOUS term (pa * velocity), which demands an unbounded motor rate as
-// the tube -- and therefore the time constant -- grows.
+// In a curved bowden the compressed filament rests against the outer wall and,
+// under tension, against the inner one. Reversing direction therefore costs a
+// DEAD TRAVEL of  play = (tube_id - filament_diameter) * total_curvature
+// before anything is transmitted at all. Until that travel is done, pressure
+// advance, smooth_time and lead_time push against nothing: their command is
+// swallowed by the gap and never reaches the melt.
 //
-// The charge layer is the same compensation SPREAD over a window T_c:
-//     charge_position(t) = coef * (nominal_position(t + T_c) - nominal_position(t))
+// This layer walks that gap AHEAD of time, so it is finished exactly when the
+// real extrusion starts. It is an ENABLER, not a compensator: on its own it
+// deposits nothing -- travelling the gap transmits nothing -- but it makes the
+// other three effective again.
 //
-// It is a strictly additive layer: coef = 0 (or T_c = 0) leaves every existing
-// path untouched, bit for bit. On a cruise segment it delivers coef * v * T_c,
-// so T_c -> 0 degenerates to plain pressure advance of value coef*T_c, while
-// T_c = tau reproduces lead_time. The motor peak is bounded by
-// feed_rate * (1 + coef) instead of growing without limit.
-//
-// The window is set from a DISTANCE and a SPEED (T_c = dist / speed) because
-// that is what an operator can measure on a machine; seconds never appear in
-// the user-facing command.
-//
-// It reads the NOMINAL trajectory, not the pressure-advanced one: the two
-// layers compensate different physics and must not feed each other.
+// State is a square wave: 0 while pushing, -play while pulling. The ramp toward
+// the next state is anticipated so that it LANDS on the reversal, never after.
+// Its duration is play / speed -- a couple of millimetres at a hundred mm/s, so
+// a handful of milliseconds. That bound matters: the scan window it claims stays
+// far inside what the smoothing already asks for, which is why this cannot push
+// step generation out of its sliding window (the failure mode documented in
+// YUMI_PATCHES.md as "Invalid sequence").
+// The direction history, stamped by the planner. A position callback has no
+// memory: after a 40 ms pause it can no longer see which way the filament last
+// went, and reading further back means reading moves Klipper may already have
+// freed -- the very fault that produces "Invalid sequence". So the planner, which
+// walks the moves in order and therefore KNOWS, records each reversal here.
+// Same shape as pa_list, for the same reason.
+struct backlash_params {
+    double target, print_time;
+    struct list_node node;
+};
+
+// Offset at `print_time`: hold the current target, and ramp toward the next one
+// so the ramp LANDS on the reversal instead of starting there. That is the whole
+// point -- the gap must be walked before the real extrusion begins, not during.
 static double
-charge_lookahead(struct move *m, double move_time, double window)
+backlash_lookup(struct list_head *bl_list, double print_time, double ramp)
 {
-    // Nominal extruder position at move_time + window, walking forward through
-    // the queue exactly as pa_range_integrate does. itersolve guarantees the
-    // moves are present because gen_steps_post_active covers the window (see
-    // extruder_update_scan_window); the trapq sentinel move terminates the walk.
-    double t = move_time + window;
-    while (unlikely(t > m->move_t)) {
-        t -= m->move_t;
-        m = list_next_entry(m, node);
+    struct backlash_params *bp = list_last_entry(bl_list,
+                                                 struct backlash_params, node);
+    while (unlikely(bp->print_time > print_time)
+           && !list_is_first(&bp->node, bl_list)) {
+        struct backlash_params *prev = list_prev_entry(bp, node);
+        if (prev->print_time > print_time) {
+            bp = prev;
+            continue;
+        }
+        // `bp` is the upcoming reversal, `prev` the state we are still in.
+        double dt = bp->print_time - print_time;
+        if (dt >= ramp)
+            return prev->target;
+        return prev->target
+               + (bp->target - prev->target) * (ramp - dt) / ramp;
     }
-    return m->start_pos.x + move_get_distance(m, t);
+    return bp->target;
 }
 
 static double
@@ -175,37 +196,68 @@ extruder_calc_position(struct stepper_kinematics *sk, struct move *m
         double area = pa_range_integrate(m, move_time, &es->pa_list, hst);
         pos = m->start_pos.x + area * es->inv_half_smooth_time2;
     }
-    // YUMI: additive bowden charge layer -- neutral when coef or window is zero
-    if (es->charge_coef && es->charge_window) {
-        double nominal = m->start_pos.x + move_get_distance(m, move_time);
-        double ahead = charge_lookahead(m, move_time, es->charge_window);
-        pos += es->charge_coef * (ahead - nominal);
-    }
+    // YUMI: additive backlash take-up -- neutral when the play is zero, which is
+    // the case whenever no bowden length is declared.
+    if (es->backlash_play > 0. && es->backlash_ramp > 0.)
+        pos += backlash_lookup(&es->bl_list, m->print_time + move_time,
+                               es->backlash_ramp);
     return pos;
 }
 
 // YUMI: the scan window itersolve must keep populated -- the smoothing needs
-// half_smooth_time on both sides, the charge needs charge_window ahead. Written
+// half_smooth_time on both sides, the take-up a few ms each way. Written
 // in ONE place so the two layers cannot disagree about what they require.
 static void
 extruder_update_scan_window(struct extruder_stepper *es)
 {
     double hst = es->half_smooth_time;
-    double post = hst;
-    if (es->charge_coef && es->charge_window > post)
-        post = es->charge_window;
-    es->sk.gen_steps_pre_active = hst;
-    es->sk.gen_steps_post_active = post;
+    double win = hst;
+    // The take-up reads a few milliseconds on both sides: back to know which way
+    // the filament last went, forward to land the ramp on the reversal.
+    if (es->backlash_play > 0. && es->backlash_ramp > win)
+        win = es->backlash_ramp;
+    es->sk.gen_steps_pre_active = win;
+    es->sk.gen_steps_post_active = win;
 }
 
 void __visible
-extruder_set_charge(struct stepper_kinematics *sk, double charge_coef
-                    , double charge_window)
+extruder_set_backlash(struct stepper_kinematics *sk, double play, double ramp)
 {
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
-    es->charge_coef = charge_coef;
-    es->charge_window = charge_window;
+    es->backlash_play = play;
+    es->backlash_ramp = ramp;
     extruder_update_scan_window(es);
+}
+
+// Called by the planner when the commanded extruder direction flips. `target` is
+// where the take-up must stand once the reversal is reached: 0 when the filament
+// will push (the gap is closed ahead of it), -play when it will pull.
+void __visible
+extruder_backlash_flip(struct stepper_kinematics *sk, double print_time
+                       , double target)
+{
+    struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
+    struct backlash_params *last = list_last_entry(
+            &es->bl_list, struct backlash_params, node);
+    if (last->target == target)
+        return;                         // nothing changed, keep the list short
+    // Drop entries the flush has moved past, so the list cannot grow unbounded.
+    double cleanup = sk->last_flush_time - es->backlash_ramp;
+    struct backlash_params *first = list_first_entry(
+            &es->bl_list, struct backlash_params, node);
+    while (!list_is_last(&first->node, &es->bl_list)) {
+        struct backlash_params *next = list_next_entry(first, node);
+        if (next->print_time >= cleanup)
+            break;
+        list_del(&first->node);
+        free(first);
+        first = next;
+    }
+    struct backlash_params *bp = malloc(sizeof(*bp));
+    memset(bp, 0, sizeof(*bp));
+    bp->target = target;
+    bp->print_time = print_time;
+    list_add_tail(&bp->node, &es->bl_list);
 }
 
 void __visible
@@ -215,7 +267,7 @@ extruder_set_pressure_advance(struct stepper_kinematics *sk, double print_time
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     double hst = smooth_time * .5, old_hst = es->half_smooth_time;
     es->half_smooth_time = hst;
-    // YUMI: the charge layer also claims a forward window -- one writer
+    // YUMI: the take-up also claims a window -- one writer, so they agree
     extruder_update_scan_window(es);
 
     // Cleanup old pressure advance parameters
@@ -254,6 +306,10 @@ extruder_stepper_alloc(void)
     es->sk.calc_position_cb = extruder_calc_position;
     es->sk.active_flags = AF_X;
     list_init(&es->pa_list);
+    list_init(&es->bl_list);
+    struct backlash_params *bp = malloc(sizeof(*bp));
+    memset(bp, 0, sizeof(*bp));
+    list_add_tail(&bp->node, &es->bl_list);
     struct pa_params *pa = malloc(sizeof(*pa));
     memset(pa, 0, sizeof(*pa));
     list_add_tail(&pa->node, &es->pa_list);
@@ -269,6 +325,12 @@ extruder_stepper_free(struct stepper_kinematics *sk)
                 &es->pa_list, struct pa_params, node);
         list_del(&pa->node);
         free(pa);
+    }
+    while (!list_empty(&es->bl_list)) {
+        struct backlash_params *bp = list_first_entry(
+                &es->bl_list, struct backlash_params, node);
+        list_del(&bp->node);
+        free(bp);
     }
     free(sk);
 }

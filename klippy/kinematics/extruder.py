@@ -6,10 +6,20 @@
 import math, logging
 import stepper, chelper
 
-# YUMI: bounds of the bowden charge layer, written once and reused by the
+# YUMI: bounds of the bowden backlash take-up, written once and reused by the
 # config reader and the gcode command so they cannot drift apart.
-CHARGE_COEF_MAX = 4.
-CHARGE_WINDOW_MAX = 2.
+BACKLASH_COEF_MAX = 5.
+# Hard ceiling on the anticipation window. The smoothing already asks Klipper for
+# up to 100 ms of forward moves and that is proven safe; going far beyond pushes
+# step generation out of its sliding window ("Invalid sequence", see
+# YUMI_PATCHES.md). A take-up ramp is a few ms, so this is never reached in
+# practice -- it exists so a bad setting is REFUSED instead of crashing a print.
+BACKLASH_RAMP_MAX = .100
+DEFAULT_FILAMENT_D = 1.75
+DEFAULT_BOWDEN_ID = 2.0
+# Tightest radius a PTFE bowden is bent to on these machines, mm. Used only to
+# cap the declared routing: a short tube cannot physically hold a full turn.
+BOWDEN_BEND_RADIUS = 25.
 
 class ExtruderStepper:
     def __init__(self, config):
@@ -22,13 +32,27 @@ class ExtruderStepper:
         self.config_pa = config.getfloat('pressure_advance', 0., minval=0.)
         self.config_smooth_time = config.getfloat(
                 'pressure_advance_smooth_time', 0.040, above=0., maxval=.200)
-        # YUMI: bowden charge layer -- set from a DISTANCE (mm) and a SPEED
-        # (mm/s) because that is what is measurable on a machine; the window
-        # T_c = dist/speed is derived, never typed. Neutral while coef is 0.
-        self.charge_dist = config.getfloat('charge_dist', 0., minval=0.)
-        self.charge_speed = config.getfloat('charge_speed', 45., above=0.)
-        self.charge_coef = config.getfloat('charge_coef', 0., minval=0.,
-                                           maxval=CHARGE_COEF_MAX)
+        # YUMI: bowden backlash take-up. The operator declares GEOMETRY, never
+        # a play: the tube length and its bore. Everything else is deduced --
+        # play = (bore - filament) * curvature -- so there is one number to
+        # measure and no number to guess. bowden_length 0 (the default, i.e. not
+        # declared) leaves the layer off and the stock path untouched.
+        self.bowden_length = config.getfloat('bowden_length', 0., minval=0.)
+        self.bowden_id = config.getfloat('bowden_id', DEFAULT_BOWDEN_ID,
+                                         above=0.)
+        # Routing hypothesis, in turns of tube. It is an assumption, not a
+        # measurement: it is declared here so it can be seen and changed, never
+        # hidden in the formula. Capped by what the length can physically bend.
+        self.bowden_turns = config.getfloat('bowden_turns', 1., minval=0.)
+        # The filament diameter is already known to [extruder]; fall back for a
+        # standalone [extruder_stepper], which has no such setting.
+        self.filament_d = config.getfloat('filament_diameter',
+                                          DEFAULT_FILAMENT_D, above=0.)
+        self.backlash_speed = config.getfloat('backlash_speed', 120., above=0.)
+        # The experimental knob: multiplies the COMPUTED play. 2 doubles it, 0.5
+        # halves it. Tuned live like flow, without ever touching the geometry.
+        self.backlash_coef = config.getfloat('backlash_coef', 1., minval=0.,
+                                             maxval=BACKLASH_COEF_MAX)
         # Setup stepper
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -36,6 +60,9 @@ class ExtruderStepper:
                                        ffi_lib.extruder_stepper_free)
         self.stepper.set_stepper_kinematics(self.sk_extruder)
         self.motion_queue = None
+        # YUMI: where the take-up currently stands, mirrored from the C list so
+        # the planner only stamps real changes.
+        self._backlash_target = 0.
         # Register commands
         self.printer.register_event_handler("klippy:connect",
                                             self._handle_connect)
@@ -55,84 +82,75 @@ class ExtruderStepper:
                                    desc=self.cmd_SYNC_EXTRUDER_MOTION_help)
     def _handle_connect(self):
         self._set_pressure_advance(self.config_pa, self.config_smooth_time)
-        self._set_charge(self.charge_dist, self.charge_speed, self.charge_coef)
+        self._apply_backlash()
     def get_status(self, eventtime):
         motion_queuing = self.printer.lookup_object('motion_queuing')
         lead_time = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
         return {'pressure_advance': self.pressure_advance,
                 'smooth_time': self.pressure_advance_smooth_time,
                 'lead_time': lead_time,
-                'charge_dist': self.charge_dist,
-                'charge_speed': self.charge_speed,
-                'charge_coef': self.charge_coef,
-                'charge_window': self._charge_window(),
+                'bowden_length': self.bowden_length,
+                'bowden_id': self.bowden_id,
+                'backlash_coef': self.backlash_coef,
+                'backlash_speed': self.backlash_speed,
+                'backlash_play': self._backlash_play(),
                 'motion_queue': self.motion_queue}
-    def _charge_window(self):
-        # YUMI: the window is DERIVED (T_c = dist / speed), never stored -- one
-        # source of truth, so the three settings cannot describe two windows.
-        if self.charge_speed <= 0.:
+    def note_extrude_dir(self, print_time, direction):
+        # YUMI: called by the planner for every move, which is the ONLY place
+        # that knows the order of things. The kinematics cannot: after a pause
+        # it can no longer see which way the filament last went, and looking
+        # further back reads moves Klipper may already have freed.
+        play = self._backlash_play()
+        if play <= 0. or not direction:
+            return
+        target = -play if direction < 0. else 0.
+        if target == self._backlash_target:
+            return
+        self._backlash_target = target
+        ffi_main, ffi_lib = chelper.get_ffi()
+        ffi_lib.extruder_backlash_flip(self.sk_extruder, print_time, target)
+    def _backlash_play(self):
+        # YUMI: the dead travel, deduced -- never typed. In a bend the filament
+        # rests on the outer wall going in and the inner one coming back, so the
+        # lost travel is the diametral clearance times the total turned angle.
+        # theta is capped by length / min_radius: a 50 mm tube cannot hold a
+        # full turn, and pretending otherwise is how a 960 mm tube ended up
+        # claiming six turns and ten millimetres of play.
+        if self.bowden_length <= 0.:
             return 0.
-        return self.charge_dist / self.charge_speed
-    def _set_charge(self, charge_dist, charge_speed, charge_coef):
-        # YUMI: additive layer -- coef 0 (or a null window) restores the stock
-        # path exactly, so this is safe to leave configured and switch off.
-        self.charge_dist = charge_dist
-        self.charge_speed = charge_speed
-        self.charge_coef = charge_coef
-        window = self._charge_window()
-        if window > CHARGE_WINDOW_MAX:
-            window = CHARGE_WINDOW_MAX
+        clearance = self.bowden_id - self.filament_d
+        if clearance <= 0.:
+            return 0.
+        theta = self.bowden_turns * 2. * math.pi
+        theta = min(theta, self.bowden_length / BOWDEN_BEND_RADIUS)
+        return clearance * theta * self.backlash_coef
+    def _backlash_ramp(self):
+        # Time to walk the play at the declared speed. A couple of millimetres
+        # at a hundred mm/s: a handful of milliseconds, which is what keeps this
+        # layer well inside the window step generation can serve.
+        play = self._backlash_play()
+        if play <= 0.:
+            return 0.
+        return play / self.backlash_speed
+    def _apply_backlash(self, gcmd=None):
+        play, ramp = self._backlash_play(), self._backlash_ramp()
+        if ramp > BACKLASH_RAMP_MAX:
+            # Refuse, loudly. Silently clipping is what turned a bad setting
+            # into a mid-print "Invalid sequence" instead of an error message.
+            msg = ("bowden take-up would need %.0f ms (play %.2f mm at %.0f"
+                   " mm/s); the limit is %.0f ms. Raise backlash_speed or lower"
+                   " backlash_coef." % (ramp * 1000., play, self.backlash_speed,
+                                        BACKLASH_RAMP_MAX * 1000.))
+            if gcmd is not None:
+                raise gcmd.error(msg)
+            raise self.printer.config_error(msg)
         toolhead = self.printer.lookup_object("toolhead")
         # Changing the scan window needs a full kinematic flush, like smoothing.
         toolhead.flush_step_generation()
         ffi_main, ffi_lib = chelper.get_ffi()
-        ffi_lib.extruder_set_charge(self.sk_extruder, charge_coef, window)
+        ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
+        self._backlash_target = 0.
         motion_queuing = self.printer.lookup_object('motion_queuing')
-        motion_queuing.check_step_generation_scan_windows()
-    def _cur_lead(self):
-        mq = self.printer.lookup_object('motion_queuing')
-        return mq.get_trapq_lead(self.stepper.get_trapq())
-    def _set_lead_time(self, gcmd, lead_time):
-        # YUMI: lead belongs to the motion queue (trapq); apply it to whatever
-        # trapq this stepper is currently bound to. Synced feeders share it.
-        strapq = self.stepper.get_trapq()
-        if strapq is None:
-            gcmd.respond_info("Extruder stepper '%s' not bound to a motion "
-                              "queue; LEAD_TIME ignored" % (self.name,))
-            return
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.flush_step_generation()
-        motion_queuing = self.printer.lookup_object('motion_queuing')
-        motion_queuing.set_trapq_lead(strapq, lead_time)
-        # YUMI: a lead can enable (or disable) smoothing even when PA==0, so the
-        # smooth_time works WITH the lead without needing a fake tiny PA.
-        new_smooth = (self.pressure_advance_smooth_time
-                      if (self.pressure_advance or lead_time) else 0.)
-        if new_smooth != self._applied_smooth:
-            ffi_main, ffi_lib = chelper.get_ffi()
-            ffi_lib.extruder_set_pressure_advance(
-                    self.sk_extruder, 0., self.pressure_advance, new_smooth)
-            self._applied_smooth = new_smooth
-        motion_queuing.check_step_generation_scan_windows()
-    def find_past_position(self, print_time):
-        mcu_pos = self.stepper.get_past_mcu_position(print_time)
-        return self.stepper.mcu_to_commanded_position(mcu_pos)
-    def sync_to_extruder(self, extruder_name):
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.flush_step_generation()
-        motion_queuing = self.printer.lookup_object('motion_queuing')
-        if not extruder_name:
-            self.stepper.set_trapq(None)
-            self.motion_queue = None
-            motion_queuing.check_step_generation_scan_windows()
-            return
-        extruder = self.printer.lookup_object(extruder_name, None)
-        if extruder is None or not isinstance(extruder, PrinterExtruder):
-            raise self.printer.command_error("'%s' is not a valid extruder."
-                                             % (extruder_name,))
-        self.stepper.set_position([extruder.last_position, 0., 0.])
-        self.stepper.set_trapq(extruder.get_trapq())
-        self.motion_queue = extruder_name
         motion_queuing.check_step_generation_scan_windows()
     def _set_pressure_advance(self, pressure_advance, smooth_time):
         # YUMI: smoothing is active when PA>0 OR a lead is set on this trapq, so
@@ -174,26 +192,40 @@ class ExtruderStepper:
         lead_time = gcmd.get_float('LEAD_TIME', None, minval=0., maxval=0.5)
         if lead_time is not None:
             self._set_lead_time(gcmd, lead_time)
-        # YUMI: bowden charge -- three settings tunable LIVE, so the amount can
-        # be corrected mid-print on the first calibration runs.
-        c_dist = gcmd.get_float('CHARGE_DIST', self.charge_dist, minval=0.)
-        c_speed = gcmd.get_float('CHARGE_SPEED', self.charge_speed, above=0.)
-        c_coef = gcmd.get_float('CHARGE_COEF', self.charge_coef, minval=0.,
-                                maxval=CHARGE_COEF_MAX)
-        if (c_dist, c_speed, c_coef) != (self.charge_dist, self.charge_speed,
-                                         self.charge_coef):
-            self._set_charge(c_dist, c_speed, c_coef)
+        # YUMI: bowden take-up. BOWDEN_LENGTH is the geometry (normally set once
+        # in the config); BACKLASH_COEF is the experimental knob, meant to be
+        # swept live during a calibration print exactly like flow.
+        b_len = gcmd.get_float('BOWDEN_LENGTH', self.bowden_length, minval=0.)
+        b_coef = gcmd.get_float('BACKLASH_COEF', self.backlash_coef, minval=0.,
+                                maxval=BACKLASH_COEF_MAX)
+        b_speed = gcmd.get_float('BACKLASH_SPEED', self.backlash_speed,
+                                 above=0.)
+        if (b_len, b_coef, b_speed) != (self.bowden_length, self.backlash_coef,
+                                        self.backlash_speed):
+            keep = (self.bowden_length, self.backlash_coef, self.backlash_speed)
+            self.bowden_length, self.backlash_coef = b_len, b_coef
+            self.backlash_speed = b_speed
+            try:
+                self._apply_backlash(gcmd)
+            except Exception:
+                # A refused setting must leave the machine exactly as it was.
+                (self.bowden_length, self.backlash_coef,
+                 self.backlash_speed) = keep
+                raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
         msg = ("pressure_advance: %.6f\n"
                "pressure_advance_smooth_time: %.6f\n"
                "lead_time: %.6f\n"
-               "charge_dist: %.3f mm\n"
-               "charge_speed: %.3f mm/s\n"
-               "charge_coef: %.6f\n"
-               "charge_window: %.6f s"
-               % (pressure_advance, smooth_time, cur_lead, self.charge_dist,
-                  self.charge_speed, self.charge_coef, self._charge_window()))
+               "bowden_length: %.1f mm\n"
+               "bowden_id: %.2f mm\n"
+               "backlash_coef: %.3f\n"
+               "backlash_speed: %.1f mm/s\n"
+               "backlash_play: %.3f mm (deduced)\n"
+               "backlash_ramp: %.1f ms"
+               % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
+                  self.bowden_id, self.backlash_coef, self.backlash_speed,
+                  self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
@@ -352,6 +384,11 @@ class PrinterExtruder:
         # Positions are untouched; only the time base of the E trapq moves.
         lead = self.motion_queuing.trapq_leads.get(self._trapq_addr, 0.)
         # Queue movement (x is extruder movement, y is pressure advance flag)
+        # YUMI: tell the take-up which way this move goes, BEFORE it is queued.
+        # The layer then walks the gap so that it is closed exactly when this
+        # move begins -- the start of the ramp is shifted, never the ramp itself.
+        if self.extruder_stepper is not None and axis_r:
+            self.extruder_stepper.note_extrude_dir(print_time - lead, axis_r)
         self.trapq_append(self.trapq, print_time - lead,
                           move.accel_t, move.cruise_t, move.decel_t,
                           move.start_pos[ea_index], 0., 0.,
