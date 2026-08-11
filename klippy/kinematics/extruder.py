@@ -91,6 +91,7 @@ class ExtruderStepper:
                 'lead_time': lead_time,
                 'bowden_length': self.bowden_length,
                 'bowden_id': self.bowden_id,
+                'bowden_turns': self.bowden_turns,
                 'backlash_coef': self.backlash_coef,
                 'backlash_speed': self.backlash_speed,
                 'backlash_play': self._backlash_play(),
@@ -200,17 +201,25 @@ class ExtruderStepper:
                                 maxval=BACKLASH_COEF_MAX)
         b_speed = gcmd.get_float('BACKLASH_SPEED', self.backlash_speed,
                                  above=0.)
-        if (b_len, b_coef, b_speed) != (self.bowden_length, self.backlash_coef,
-                                        self.backlash_speed):
-            keep = (self.bowden_length, self.backlash_coef, self.backlash_speed)
+        # The two settings that actually MOVE the play: the bore sets the
+        # clearance, the routing sets the angle. Length only caps the angle, so
+        # it stops mattering past a couple of hundred mm -- exposing these live
+        # is what makes a sweep informative.
+        b_id = gcmd.get_float('BOWDEN_ID', self.bowden_id, above=0.)
+        b_turns = gcmd.get_float('BOWDEN_TURNS', self.bowden_turns, minval=0.)
+        cur = (self.bowden_length, self.backlash_coef, self.backlash_speed,
+               self.bowden_id, self.bowden_turns)
+        if (b_len, b_coef, b_speed, b_id, b_turns) != cur:
+            keep = cur
             self.bowden_length, self.backlash_coef = b_len, b_coef
             self.backlash_speed = b_speed
+            self.bowden_id, self.bowden_turns = b_id, b_turns
             try:
                 self._apply_backlash(gcmd)
             except Exception:
                 # A refused setting must leave the machine exactly as it was.
-                (self.bowden_length, self.backlash_coef,
-                 self.backlash_speed) = keep
+                (self.bowden_length, self.backlash_coef, self.backlash_speed,
+                 self.bowden_id, self.bowden_turns) = keep
                 raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
@@ -219,12 +228,14 @@ class ExtruderStepper:
                "lead_time: %.6f\n"
                "bowden_length: %.1f mm\n"
                "bowden_id: %.2f mm\n"
+               "bowden_turns: %.2f\n"
                "backlash_coef: %.3f\n"
                "backlash_speed: %.1f mm/s\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
-                  self.bowden_id, self.backlash_coef, self.backlash_speed,
+                  self.bowden_id, self.bowden_turns, self.backlash_coef,
+                  self.backlash_speed,
                   self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
