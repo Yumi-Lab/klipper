@@ -268,14 +268,19 @@ class ExtruderStepper:
                 raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
-        msg = ("pressure_advance: %.6f (configurable)\n"
-               "pressure_advance_smooth_time: %.6f (configurable)\n"
-               "lead_time: %.6f (configurable)\n"
-               "bowden_length: %.1f mm (configurable)\n"
-               "bowden_id: %.2f mm (configurable)\n"
-               "bowden_turns: %.2f (configurable)\n"
-               "backlash_coef: %.3f (configurable)\n"
-               "backlash_speed: %.1f mm/s (configurable)\n"
+        # YUMI: les noms affiches sont EXACTEMENT ceux de la commande, en
+        # majuscules, pour se copier-coller sans traduction. Les valeurs
+        # deduites gardent la minuscule : il n'existe pas de parametre pour
+        # elles, les taper ne marcherait pas. L'API get_status, elle, garde les
+        # noms Klipper d'origine -- c'est elle que lisent Mainsail et Moonraker.
+        msg = ("ADVANCE: %.6f (configurable)\n"
+               "SMOOTH_TIME: %.6f (configurable)\n"
+               "LEAD_TIME: %.6f (configurable)\n"
+               "BOWDEN_LENGTH: %.1f mm (configurable)\n"
+               "BOWDEN_ID: %.2f mm (configurable)\n"
+               "BOWDEN_TURNS: %.2f (configurable)\n"
+               "BACKLASH_COEF: %.3f (configurable)\n"
+               "BACKLASH_SPEED: %.1f mm/s (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
