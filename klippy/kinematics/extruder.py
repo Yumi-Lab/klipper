@@ -70,6 +70,15 @@ class ExtruderStepper:
         # `backlash_deduct` : la pression n'est donc pas encore la quand la buse
         # arrive, ce qui evite la goutte formee dans le vide juste avant.
         self.backlash_deduct = config.getfloat('backlash_deduct', 0., minval=0.)
+        # La deduction ne peut PAS tenir seule : si le decalage se repose a
+        # -deduct, la retraction suivante repart de la et ne transmet plus que
+        # (jeu - deduct) -- les deux cotes se reduisent pareil, l'asymetrie
+        # disparait. Pour que la RETRACTION reste complete et que seul le RETOUR
+        # soit reduit, le residu doit revenir a zero entre les deux. On le rend
+        # pendant l'extrusion continue, sur cette distance : c'est le seul moment
+        # ou le jeu est ferme et tenu ferme par la pression.
+        self.backlash_bleed = config.getfloat('backlash_bleed', 20., above=0.)
+        self._bleed_left = 0.
         # The experimental knob: multiplies the COMPUTED play. 2 doubles it, 0.5
         # halves it. Tuned live like flow, without ever touching the geometry.
         self.backlash_coef = config.getfloat('backlash_coef', 1., minval=0.,
@@ -84,6 +93,7 @@ class ExtruderStepper:
         # YUMI: where the take-up currently stands, mirrored from the C list so
         # the planner only stamps real changes.
         self._backlash_target = 0.
+        self._backlash_flips = 0
         # Derniere rampe non nulle : sert a ramener l'offset a zero quand le jeu
         # tombe a zero, au lieu de couper net.
         self._last_ramp = .02
@@ -120,9 +130,16 @@ class ExtruderStepper:
                 'backlash_speed': self.backlash_speed,
                 'backlash_accel': self.backlash_accel,
                 'backlash_deduct': self.backlash_deduct,
+                'backlash_bleed': self.backlash_bleed,
                 'backlash_play': self._backlash_play(),
+                # Ce que le planner a REELLEMENT jalonne en dernier, et combien
+                # de fois. Sans ca, on ne peut pas distinguer "le reglage est
+                # pris" de "le reglage agit sur le moteur" -- les deux se
+                # ressemblent dans l'API et seul le second compte.
+                'backlash_target': self._backlash_target,
+                'backlash_flips': self._backlash_flips,
                 'motion_queue': self.motion_queue}
-    def note_extrude_dir(self, print_time, direction):
+    def note_extrude_dir(self, print_time, direction, dist=0.):
         # YUMI: called by the planner for every move, which is the ONLY place
         # that knows the order of things. The kinematics cannot: after a pause
         # it can no longer see which way the filament last went, and looking
@@ -136,19 +153,32 @@ class ExtruderStepper:
         # jour -- d'un coup, donc en cassant stepcompress.
         if play > 0. and direction < 0.:
             target = -play          # traction : on ouvre le jeu en entier
-        elif play > 0. and self.backlash_deduct > 0.:
+            self._bleed_left = 0.
+        elif play > 0. and self._bleed_left > 0.:
+            # On rend le residu au fil de l'extrusion. Tant qu'il reste de la
+            # distance, la cible ne bouge pas ; une fois epuisee, elle retombe a
+            # zero et la retraction suivante repartira bien de zero.
+            self._bleed_left -= abs(dist)
+            target = (0. if self._bleed_left <= 0.
+                      else -min(self.backlash_deduct, play))
+        elif play > 0. and self.backlash_deduct > 0. \
+                and self._backlash_target == -play:
             # Retour : on repousse tout SAUF la deduction. Le decalage se REPOSE
             # donc a -deduct pendant l'impression au lieu de revenir a zero : la
             # pression arrive moins fort a la buse, ce qui evite la goutte formee
             # dans le vide juste avant l'arrivee. Nicolas compense au trancheur.
             # Pas de derive : les deux cibles sont ABSOLUES, le decalage alterne
             # entre deux points fixes, il ne s'accumule jamais.
+            # Premiere poussee apres une traction : on repousse tout SAUF la
+            # deduction, et on arme la resorption.
             target = -min(self.backlash_deduct, play)
+            self._bleed_left = self.backlash_bleed
         else:
             target = 0.
         if target == self._backlash_target:
             return
         self._backlash_target = target
+        self._backlash_flips += 1
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.extruder_backlash_flip(self.sk_extruder, print_time, target)
     def _backlash_play(self):
@@ -319,23 +349,24 @@ class ExtruderStepper:
                                maxval=BACKLASH_ACCEL_MAX)
         b_ded = gcmd.get_float('BACKLASH_DEDUCT', self.backlash_deduct,
                                minval=0.)
+        b_bld = gcmd.get_float('BACKLASH_BLEED', self.backlash_bleed, above=0.)
         cur = (self.bowden_length, self.backlash_coef, self.backlash_speed,
                self.bowden_id, self.bowden_turns, self.backlash_accel,
-               self.backlash_deduct)
-        if (b_len, b_coef, b_speed, b_id, b_turns, b_acc, b_ded) != cur:
+               self.backlash_deduct, self.backlash_bleed)
+        if (b_len, b_coef, b_speed, b_id, b_turns, b_acc, b_ded, b_bld) != cur:
             keep = cur
             self.bowden_length, self.backlash_coef = b_len, b_coef
             self.backlash_speed = b_speed
             self.bowden_id, self.bowden_turns = b_id, b_turns
             self.backlash_accel = b_acc
-            self.backlash_deduct = b_ded
+            self.backlash_deduct, self.backlash_bleed = b_ded, b_bld
             try:
                 self._apply_backlash(gcmd)
             except Exception:
                 # A refused setting must leave the machine exactly as it was.
                 (self.bowden_length, self.backlash_coef, self.backlash_speed,
                  self.bowden_id, self.bowden_turns, self.backlash_accel,
-                 self.backlash_deduct) = keep
+                 self.backlash_deduct, self.backlash_bleed) = keep
                 raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
@@ -354,12 +385,14 @@ class ExtruderStepper:
                "BACKLASH_SPEED: %.1f mm/s (configurable)\n"
                "BACKLASH_ACCEL: %.0f mm/s2 (configurable)\n"
                "BACKLASH_DEDUCT: %.3f mm (configurable)\n"
+               "BACKLASH_BLEED: %.1f mm (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
                   self.bowden_id, self.bowden_turns, self.backlash_coef,
                   self.backlash_speed, self.backlash_accel,
-                  self.backlash_deduct, self._backlash_play(), self._backlash_ramp() * 1000.))
+                  self.backlash_deduct, self.backlash_bleed,
+                  self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
@@ -552,7 +585,8 @@ class PrinterExtruder:
         # only self.extruder_stepper left every feeder's take-up disarmed.
         if axis_r:
             for es in self._backlash_steppers():
-                es.note_extrude_dir(print_time - lead, axis_r)
+                es.note_extrude_dir(print_time - lead, axis_r,
+                                    abs(move.axes_d[ea_index]))
         self.trapq_append(self.trapq, print_time - lead,
                           move.accel_t, move.cruise_t, move.decel_t,
                           move.start_pos[ea_index], 0., 0.,
