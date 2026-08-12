@@ -243,6 +243,25 @@ extruder_set_backlash(struct stepper_kinematics *sk, double play, double ramp)
     extruder_update_scan_window(es);
 }
 
+// Remet l'historique a plat. A appeler quand le stepper CHANGE DE FILE : sync_to_
+// extruder fait un set_position() qui ignore l'offset, donc un jalon survivant de
+// l'attache precedente ferait reapparaitre le decalage d'un coup -- saut de
+// position, "Internal error in stepcompress", machine arretee en pleine impression.
+void __visible
+extruder_backlash_reset(struct stepper_kinematics *sk)
+{
+    struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
+    while (!list_empty(&es->bl_list)) {
+        struct backlash_params *bp = list_first_entry(
+                &es->bl_list, struct backlash_params, node);
+        list_del(&bp->node);
+        free(bp);
+    }
+    struct backlash_params *bp = malloc(sizeof(*bp));
+    memset(bp, 0, sizeof(*bp));
+    list_add_tail(&bp->node, &es->bl_list);
+}
+
 // Called by the planner when the commanded extruder direction flips. `target` is
 // where the take-up must stand once the reversal is reached: 0 when the filament
 // will push (the gap is closed ahead of it), -play when it will pull.

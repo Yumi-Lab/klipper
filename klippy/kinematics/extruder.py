@@ -219,6 +219,12 @@ class ExtruderStepper:
     def sync_to_extruder(self, extruder_name):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.flush_step_generation()
+        # YUMI: changer de file remet le stepper a une position qui IGNORE
+        # l'offset de rattrapage. Un jalon survivant de l'attache precedente le
+        # ferait donc reapparaitre d'un coup. On repart d'un historique vierge.
+        ffi_main, ffi_lib = chelper.get_ffi()
+        ffi_lib.extruder_backlash_reset(self.sk_extruder)
+        self._backlash_target = 0.
         motion_queuing = self.printer.lookup_object('motion_queuing')
         if not extruder_name:
             self.stepper.set_trapq(None)
