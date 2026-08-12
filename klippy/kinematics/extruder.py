@@ -257,9 +257,27 @@ class ExtruderStepper:
                 raise gcmd.error(msg)
             raise self.printer.config_error(msg)
         toolhead = self.printer.lookup_object("toolhead")
-        # Changing the scan window needs a full kinematic flush, like smoothing.
-        toolhead.flush_step_generation()
         ffi_main, ffi_lib = chelper.get_ffi()
+        # RAMENER LE DECALAGE A ZERO AVANT DE TOUCHER AUX PARAMETRES.
+        # Six arrets machine sont partis d'ici : eteindre la couche, changer de
+        # file, changer la rampe... a chaque fois un parametre bougeait pendant
+        # que l'offset valait autre chose que zero, et la position sautait.
+        # Corriger cas par cas n'a fait qu'ouvrir la porte suivante. On pose donc
+        # le principe : la couche revient a zero PAR SA RAMPE, on attend que les
+        # pas soient emis, et seulement ensuite on change ce qu'on veut.
+        if self._backlash_target:
+            ffi_lib.extruder_backlash_flip(self.sk_extruder,
+                                           toolhead.get_last_move_time(),
+                                           0., self._backlash_ramp())
+            self._backlash_target = 0.
+            toolhead.dwell(self._backlash_ramp())
+        toolhead.flush_step_generation()
+        # Repartir d'un historique vierge : plus aucun jalon ne peut etre relu
+        # avec les nouveaux reglages.
+        ffi_lib.extruder_backlash_reset(self.sk_extruder)
+        self._backlash_target = 0.
+        self._restart_base = 0.
+        self._bleed_left = 0.
         ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
         if ramp > 0.:
             self._last_ramp = ramp
