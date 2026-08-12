@@ -23,8 +23,12 @@ BACKLASH_RAMP_MAX = .100
 SMOOTH_PEAK_RATIO = 1.5
 SMOOTH_ACCEL_RATIO = 6.
 BACKLASH_ACCEL_MAX = 100000.
-# En deca, un nouveau jalon ne changerait rien de perceptible : on ne l'empile pas.
-BACKLASH_MIN_STEP = .002
+# La resorption se fait en un nombre FIXE de paliers, jamais en continu. Un jalon
+# est un evenement : a 450 par seconde ils se chevauchent tous (chacun ouvre une
+# interpolation de plusieurs dizaines de ms), l'offset tremble au lieu de ramper,
+# et stepcompress finit par refuser la sequence. Huit paliers suffisent : l'oeil
+# ne distingue pas un escalier de 8 marches d'une pente sur 20 mm de cordon.
+BACKLASH_BLEED_STEPS = 8
 DEFAULT_FILAMENT_D = 1.75
 DEFAULT_BOWDEN_ID = 2.0
 # Tightest radius a PTFE bowden is bent to on these machines, mm. Used only to
@@ -179,9 +183,13 @@ class ExtruderStepper:
                 self._bleed_left = 0.
                 target = self._restart_base
             else:
+                # Fraction restante ARRONDIE au palier : la cible ne change donc
+                # qu'au plus BACKLASH_BLEED_STEPS fois par resorption.
                 reste = self._bleed_left / self.backlash_bleed
+                pal = math.ceil(reste * BACKLASH_BLEED_STEPS)
                 target = (self._restart_base
-                          - min(self.backlash_deduct, play) * reste)
+                          - min(self.backlash_deduct, play)
+                            * pal / BACKLASH_BLEED_STEPS)
         elif play > 0. and self.backlash_deduct > 0. \
                 and self._backlash_target == -play:
             # Retour : on repousse tout SAUF la deduction. Le decalage se REPOSE
@@ -199,8 +207,7 @@ class ExtruderStepper:
             self._bleed_left = self.backlash_bleed
         else:
             target = self._restart_base
-        if self._backlash_target is not None \
-                and abs(target - self._backlash_target) < BACKLASH_MIN_STEP:
+        if target == self._backlash_target:
             return
         self._backlash_target = target
         self._backlash_flips += 1
