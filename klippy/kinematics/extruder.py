@@ -23,6 +23,8 @@ BACKLASH_RAMP_MAX = .100
 SMOOTH_PEAK_RATIO = 1.5
 SMOOTH_ACCEL_RATIO = 6.
 BACKLASH_ACCEL_MAX = 100000.
+# En deca, un nouveau jalon ne changerait rien de perceptible : on ne l'empile pas.
+BACKLASH_MIN_STEP = .002
 DEFAULT_FILAMENT_D = 1.75
 DEFAULT_BOWDEN_ID = 2.0
 # Tightest radius a PTFE bowden is bent to on these machines, mm. Used only to
@@ -168,13 +170,18 @@ class ExtruderStepper:
             target = self._restart_base - play   # traction : jeu entier
             self._bleed_left = 0.
         elif play > 0. and self._bleed_left > 0.:
-            # On rend le residu au fil de l'extrusion. Tant qu'il reste de la
-            # distance, la cible ne bouge pas ; une fois epuisee, elle retombe a
-            # zero et la retraction suivante repartira bien de zero.
+            # On rend le residu PROPORTIONNELLEMENT a l'extrusion parcourue : le
+            # manque s'etale sur la ligne au lieu de revenir d'un bloc. Attendre
+            # puis tout rendre d'un coup laissait un renflement de 0,1 mm en un
+            # dixieme de seconde, quelque part au milieu du trait.
             self._bleed_left -= abs(dist)
-            target = (self._restart_base if self._bleed_left <= 0.
-                      else self._restart_base
-                           - min(self.backlash_deduct, play))
+            if self._bleed_left <= 0.:
+                self._bleed_left = 0.
+                target = self._restart_base
+            else:
+                reste = self._bleed_left / self.backlash_bleed
+                target = (self._restart_base
+                          - min(self.backlash_deduct, play) * reste)
         elif play > 0. and self.backlash_deduct > 0. \
                 and self._backlash_target == -play:
             # Retour : on repousse tout SAUF la deduction. Le decalage se REPOSE
@@ -192,7 +199,8 @@ class ExtruderStepper:
             self._bleed_left = self.backlash_bleed
         else:
             target = self._restart_base
-        if target == self._backlash_target:
+        if self._backlash_target is not None \
+                and abs(target - self._backlash_target) < BACKLASH_MIN_STEP:
             return
         self._backlash_target = target
         self._backlash_flips += 1
