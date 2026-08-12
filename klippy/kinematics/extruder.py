@@ -268,16 +268,16 @@ class ExtruderStepper:
                 raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
-        msg = ("pressure_advance: %.6f\n"
-               "pressure_advance_smooth_time: %.6f\n"
-               "lead_time: %.6f\n"
-               "bowden_length: %.1f mm\n"
-               "bowden_id: %.2f mm\n"
-               "bowden_turns: %.2f\n"
-               "backlash_coef: %.3f\n"
-               "backlash_speed: %.1f mm/s\n"
+        msg = ("pressure_advance: %.6f (configurable)\n"
+               "pressure_advance_smooth_time: %.6f (configurable)\n"
+               "lead_time: %.6f (configurable)\n"
+               "bowden_length: %.1f mm (configurable)\n"
+               "bowden_id: %.2f mm (configurable)\n"
+               "bowden_turns: %.2f (configurable)\n"
+               "backlash_coef: %.3f (configurable)\n"
+               "backlash_speed: %.1f mm/s (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
-               "backlash_ramp: %.1f ms"
+               "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
                   self.bowden_id, self.bowden_turns, self.backlash_coef,
                   self.backlash_speed,
