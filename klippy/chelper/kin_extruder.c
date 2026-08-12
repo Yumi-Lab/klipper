@@ -152,13 +152,17 @@ struct extruder_stepper {
 // walks the moves in order and therefore KNOWS, records each reversal here.
 // Same shape as pa_list, for the same reason.
 struct backlash_params {
-    double target, print_time;
+    double target, print_time, ramp;
     struct list_node node;
 };
 
 // Offset at `print_time`: hold the current target, and ramp toward the next one
 // so the ramp LANDS on the reversal instead of starting there. That is the whole
 // point -- the gap must be walked before the real extrusion begins, not during.
+// Chaque jalon porte SA rampe. Utiliser la rampe courante pour interpoler un
+// jalon pose avant elle ferait sauter l'offset des qu'on change la vitesse ou
+// l'acceleration en cours d'impression : a instant egal, (ramp-dt)/ramp rend une
+// fraction differente. Saut de position, "Internal error in stepcompress".
 static double
 backlash_lookup(struct list_head *bl_list, double print_time, double ramp)
 {
@@ -173,7 +177,8 @@ backlash_lookup(struct list_head *bl_list, double print_time, double ramp)
         }
         // `bp` is the upcoming reversal, `prev` the state we are still in.
         double dt = bp->print_time - print_time;
-        if (dt >= ramp)
+        double r = bp->ramp > 0. ? bp->ramp : ramp;
+        if (dt >= r)
             return prev->target;
         // Profil en S plutot qu'une pente droite. Une rampe LINEAIRE fait sauter
         // la vitesse du moteur de 0 a sa valeur d'un coup, deux fois par
@@ -182,7 +187,7 @@ backlash_lookup(struct list_head *bl_list, double print_time, double ramp)
         // claque, encaisse un a-coup, et peut perdre des pas sans le signaler.
         // f(u) = u^2 (3 - 2u) part et arrive a vitesse NULLE. Symetrique, donc
         // f(1/2) = 1/2 : la mi-rampe reste a la moitie du jeu.
-        double u = (ramp - dt) / ramp;
+        double u = (r - dt) / r;
         double sm = u * u * (3. - 2. * u);
         return prev->target + (bp->target - prev->target) * sm;
     }
@@ -267,7 +272,7 @@ extruder_backlash_reset(struct stepper_kinematics *sk)
 // will push (the gap is closed ahead of it), -play when it will pull.
 void __visible
 extruder_backlash_flip(struct stepper_kinematics *sk, double print_time
-                       , double target)
+                       , double target, double ramp)
 {
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     struct backlash_params *last = list_last_entry(
@@ -290,6 +295,7 @@ extruder_backlash_flip(struct stepper_kinematics *sk, double print_time
     memset(bp, 0, sizeof(*bp));
     bp->target = target;
     bp->print_time = print_time;
+    bp->ramp = ramp;
     list_add_tail(&bp->node, &es->bl_list);
 }
 

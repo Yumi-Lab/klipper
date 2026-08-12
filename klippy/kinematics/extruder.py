@@ -205,7 +205,8 @@ class ExtruderStepper:
         self._backlash_target = target
         self._backlash_flips += 1
         ffi_main, ffi_lib = chelper.get_ffi()
-        ffi_lib.extruder_backlash_flip(self.sk_extruder, print_time, target)
+        ffi_lib.extruder_backlash_flip(self.sk_extruder, print_time, target,
+                                       self._backlash_ramp())
     def _backlash_play(self):
         # YUMI: the dead travel, deduced -- never typed. In a bend the filament
         # rests on the outer wall going in and the inner one coming back, so the

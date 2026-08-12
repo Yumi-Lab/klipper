@@ -163,7 +163,7 @@ defs_kin_extruder = """
     void extruder_set_backlash(struct stepper_kinematics *sk
         , double play, double ramp);
     void extruder_backlash_flip(struct stepper_kinematics *sk
-        , double print_time, double target);
+        , double print_time, double target, double ramp);
     void extruder_backlash_reset(struct stepper_kinematics *sk);
 """
 
