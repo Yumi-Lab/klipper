@@ -449,9 +449,19 @@ class PrinterExtruder:
         # comprise. Reconstruit seulement quand une synchro a change (evenement
         # extruder_stepper:sync), pas a chaque mouvement.
         if self._bl_steppers is None:
-            self._bl_steppers = [
-                es for _, es in self.printer.lookup_objects('extruder_stepper')
-                if es.motion_queue == self.name]
+            out = []
+            for _, obj in self.printer.lookup_objects('extruder_stepper'):
+                # lookup_objects rend l'ENVELOPPE PrinterExtruderStepper, pas le
+                # ExtruderStepper qu'elle contient. Lire motion_queue dessus
+                # levait un AttributeError en plein flush et arretait Klipper.
+                es = getattr(obj, 'extruder_stepper', obj)
+                if getattr(es, 'motion_queue', None) == self.name:
+                    out.append(es)
+            # La tete elle-meme, si elle n'est pas deja passee par la boucle.
+            if self.extruder_stepper is not None \
+                    and self.extruder_stepper not in out:
+                out.append(self.extruder_stepper)
+            self._bl_steppers = out
         return self._bl_steppers
     def process_move(self, print_time, move, ea_index):
         axis_r = move.axes_r[ea_index]
