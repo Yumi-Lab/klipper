@@ -206,7 +206,13 @@ extruder_calc_position(struct stepper_kinematics *sk, struct move *m
     }
     // YUMI: additive backlash take-up -- neutral when the play is zero, which is
     // the case whenever no bowden length is declared.
-    if (es->backlash_play > 0. && es->backlash_ramp > 0.)
+    // On ne teste QUE la rampe, jamais le jeu. Couper la couche parce que le jeu
+    // est passe a zero ferait disparaitre d'un coup un decalage qui vaut encore
+    // -jeu : la position commandee sauterait de plusieurs millimetres et
+    // stepcompress ne sait pas emettre un saut ("Internal error in stepcompress",
+    // machine arretee). A jeu nul le planner empile simplement une cible 0, et
+    // l'offset y redescend par sa propre rampe -- continu, donc emettable.
+    if (es->backlash_ramp > 0.)
         pos += backlash_lookup(&es->bl_list, m->print_time + move_time,
                                es->backlash_ramp);
     return pos;

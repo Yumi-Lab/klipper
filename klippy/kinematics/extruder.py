@@ -79,6 +79,9 @@ class ExtruderStepper:
         # YUMI: where the take-up currently stands, mirrored from the C list so
         # the planner only stamps real changes.
         self._backlash_target = 0.
+        # Derniere rampe non nulle : sert a ramener l'offset a zero quand le jeu
+        # tombe a zero, au lieu de couper net.
+        self._last_ramp = .02
         # Register commands
         self.printer.register_event_handler("klippy:connect",
                                             self._handle_connect)
@@ -118,10 +121,14 @@ class ExtruderStepper:
         # that knows the order of things. The kinematics cannot: after a pause
         # it can no longer see which way the filament last went, and looking
         # further back reads moves Klipper may already have freed.
-        play = self._backlash_play()
-        if play <= 0. or not direction:
+        if not direction:
             return
-        target = -play if direction < 0. else 0.
+        play = self._backlash_play()
+        # A jeu nul on jalonne QUAND MEME, avec une cible de 0 : c'est ce jalon
+        # qui ramene l'offset a zero par la rampe. Sortir ici laisserait le
+        # decalage fige a sa derniere valeur, et il faudrait bien le rendre un
+        # jour -- d'un coup, donc en cassant stepcompress.
+        target = -play if (play > 0. and direction < 0.) else 0.
         if target == self._backlash_target:
             return
         self._backlash_target = target
@@ -148,7 +155,10 @@ class ExtruderStepper:
         # layer well inside the window step generation can serve.
         play = self._backlash_play()
         if play <= 0.:
-            return 0.
+            # Jeu nul : la couche ne doit pas s'eteindre, elle doit REDESCENDRE.
+            # On garde donc la derniere rampe connue, le temps que l'offset
+            # revienne a zero proprement. Sans elle, la coupure serait un saut.
+            return self._last_ramp
         # La duree qui satisfait les deux limites a la fois.
         t_vel = SMOOTH_PEAK_RATIO * play / self.backlash_speed
         t_acc = math.sqrt(SMOOTH_ACCEL_RATIO * play / self.backlash_accel)
@@ -171,7 +181,11 @@ class ExtruderStepper:
         toolhead.flush_step_generation()
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
-        self._backlash_target = 0.
+        if ramp > 0.:
+            self._last_ramp = ramp
+        # Le prochain mouvement re-jalonne la cible avec le NOUVEAU jeu : c'est
+        # ce jalon qui fait redescendre (ou remonter) l'offset en douceur.
+        self._backlash_target = None
         motion_queuing = self.printer.lookup_object('motion_queuing')
         motion_queuing.check_step_generation_scan_windows()
     def _cur_lead(self):
