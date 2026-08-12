@@ -15,6 +15,14 @@ BACKLASH_COEF_MAX = 5.
 # YUMI_PATCHES.md). A take-up ramp is a few ms, so this is never reached in
 # practice -- it exists so a bad setting is REFUSED instead of crashing a print.
 BACKLASH_RAMP_MAX = .100
+# Profil en S f(u)=u^2(3-2u) sur une distance D en une duree T :
+#   vitesse de pointe      v = 1,5 D / T          (au milieu)
+#   acceleration de pointe a = 6 D / T^2          (aux deux bords)
+# On en tire la duree minimale que chaque limite impose, et on garde la plus
+# longue : la rampe respecte alors les DEUX, sans qu'aucune ne soit une moyenne.
+SMOOTH_PEAK_RATIO = 1.5
+SMOOTH_ACCEL_RATIO = 6.
+BACKLASH_ACCEL_MAX = 100000.
 DEFAULT_FILAMENT_D = 1.75
 DEFAULT_BOWDEN_ID = 2.0
 # Tightest radius a PTFE bowden is bent to on these machines, mm. Used only to
@@ -49,6 +57,14 @@ class ExtruderStepper:
         self.filament_d = config.getfloat('filament_diameter',
                                           DEFAULT_FILAMENT_D, above=0.)
         self.backlash_speed = config.getfloat('backlash_speed', 120., above=0.)
+        # Sans borne d'acceleration, la rampe partait a pleine vitesse d'un coup :
+        # sur un extrudeur demultiplie cela veut dire des centaines de tours par
+        # minute appliques sans transition -- le moteur claque et peut perdre des
+        # pas en silence. Cette limite est CELLE DU RATTRAPAGE : les mouvements
+        # planifies, eux, restent bornes par max_extrude_only_accel, qui ne
+        # s'applique pas ici puisque la couche n'est pas un mouvement planifie.
+        self.backlash_accel = config.getfloat('backlash_accel', 2000., above=0.,
+                                              maxval=BACKLASH_ACCEL_MAX)
         # The experimental knob: multiplies the COMPUTED play. 2 doubles it, 0.5
         # halves it. Tuned live like flow, without ever touching the geometry.
         self.backlash_coef = config.getfloat('backlash_coef', 1., minval=0.,
@@ -94,6 +110,7 @@ class ExtruderStepper:
                 'bowden_turns': self.bowden_turns,
                 'backlash_coef': self.backlash_coef,
                 'backlash_speed': self.backlash_speed,
+                'backlash_accel': self.backlash_accel,
                 'backlash_play': self._backlash_play(),
                 'motion_queue': self.motion_queue}
     def note_extrude_dir(self, print_time, direction):
@@ -132,16 +149,20 @@ class ExtruderStepper:
         play = self._backlash_play()
         if play <= 0.:
             return 0.
-        return play / self.backlash_speed
+        # La duree qui satisfait les deux limites a la fois.
+        t_vel = SMOOTH_PEAK_RATIO * play / self.backlash_speed
+        t_acc = math.sqrt(SMOOTH_ACCEL_RATIO * play / self.backlash_accel)
+        return max(t_vel, t_acc)
     def _apply_backlash(self, gcmd=None):
         play, ramp = self._backlash_play(), self._backlash_ramp()
         if ramp > BACKLASH_RAMP_MAX:
             # Refuse, loudly. Silently clipping is what turned a bad setting
             # into a mid-print "Invalid sequence" instead of an error message.
             msg = ("bowden take-up would need %.0f ms (play %.2f mm at %.0f"
-                   " mm/s); the limit is %.0f ms. Raise backlash_speed or lower"
-                   " backlash_coef." % (ramp * 1000., play, self.backlash_speed,
-                                        BACKLASH_RAMP_MAX * 1000.))
+                   " mm/s, %.0f mm/s2); the limit is %.0f ms. Raise"
+                   " backlash_speed or backlash_accel, or lower backlash_coef."
+                   % (ramp * 1000., play, self.backlash_speed,
+                      self.backlash_accel, BACKLASH_RAMP_MAX * 1000.))
             if gcmd is not None:
                 raise gcmd.error(msg)
             raise self.printer.config_error(msg)
@@ -257,19 +278,22 @@ class ExtruderStepper:
         # is what makes a sweep informative.
         b_id = gcmd.get_float('BOWDEN_ID', self.bowden_id, above=0.)
         b_turns = gcmd.get_float('BOWDEN_TURNS', self.bowden_turns, minval=0.)
+        b_acc = gcmd.get_float('BACKLASH_ACCEL', self.backlash_accel, above=0.,
+                               maxval=BACKLASH_ACCEL_MAX)
         cur = (self.bowden_length, self.backlash_coef, self.backlash_speed,
-               self.bowden_id, self.bowden_turns)
-        if (b_len, b_coef, b_speed, b_id, b_turns) != cur:
+               self.bowden_id, self.bowden_turns, self.backlash_accel)
+        if (b_len, b_coef, b_speed, b_id, b_turns, b_acc) != cur:
             keep = cur
             self.bowden_length, self.backlash_coef = b_len, b_coef
             self.backlash_speed = b_speed
             self.bowden_id, self.bowden_turns = b_id, b_turns
+            self.backlash_accel = b_acc
             try:
                 self._apply_backlash(gcmd)
             except Exception:
                 # A refused setting must leave the machine exactly as it was.
                 (self.bowden_length, self.backlash_coef, self.backlash_speed,
-                 self.bowden_id, self.bowden_turns) = keep
+                 self.bowden_id, self.bowden_turns, self.backlash_accel) = keep
                 raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
@@ -286,11 +310,12 @@ class ExtruderStepper:
                "BOWDEN_TURNS: %.2f (configurable)\n"
                "BACKLASH_COEF: %.3f (configurable)\n"
                "BACKLASH_SPEED: %.1f mm/s (configurable)\n"
+               "BACKLASH_ACCEL: %.0f mm/s2 (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
                   self.bowden_id, self.bowden_turns, self.backlash_coef,
-                  self.backlash_speed,
+                  self.backlash_speed, self.backlash_accel,
                   self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)

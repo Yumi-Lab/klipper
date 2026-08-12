@@ -175,8 +175,16 @@ backlash_lookup(struct list_head *bl_list, double print_time, double ramp)
         double dt = bp->print_time - print_time;
         if (dt >= ramp)
             return prev->target;
-        return prev->target
-               + (bp->target - prev->target) * (ramp - dt) / ramp;
+        // Profil en S plutot qu'une pente droite. Une rampe LINEAIRE fait sauter
+        // la vitesse du moteur de 0 a sa valeur d'un coup, deux fois par
+        // inversion : sur un extrudeur demultiplie 50:17 cela veut dire des
+        // centaines de tours/minute appliques sans transition -- le moteur
+        // claque, encaisse un a-coup, et peut perdre des pas sans le signaler.
+        // f(u) = u^2 (3 - 2u) part et arrive a vitesse NULLE. Symetrique, donc
+        // f(1/2) = 1/2 : la mi-rampe reste a la moitie du jeu.
+        double u = (ramp - dt) / ramp;
+        double sm = u * u * (3. - 2. * u);
+        return prev->target + (bp->target - prev->target) * sm;
     }
     return bp->target;
 }
