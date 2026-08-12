@@ -189,6 +189,7 @@ class ExtruderStepper:
             self.stepper.set_trapq(None)
             self.motion_queue = None
             motion_queuing.check_step_generation_scan_windows()
+            self.printer.send_event("extruder_stepper:sync", self)
             return
         extruder = self.printer.lookup_object(extruder_name, None)
         if extruder is None or not isinstance(extruder, PrinterExtruder):
@@ -198,6 +199,10 @@ class ExtruderStepper:
         self.stepper.set_trapq(extruder.get_trapq())
         self.motion_queue = extruder_name
         motion_queuing.check_step_generation_scan_windows()
+        # YUMI: la liste des steppers lies a un extrudeur change ici, et nulle
+        # part ailleurs. On previent, plutot que de la reconstruire a chaque
+        # mouvement.
+        self.printer.send_event("extruder_stepper:sync", self)
     def _set_pressure_advance(self, pressure_advance, smooth_time):
         # YUMI: smoothing is active when PA>0 OR a lead is set on this trapq, so
         # smooth_time works at PA=0 alongside lead_time (no fake tiny PA needed).
@@ -368,6 +373,10 @@ class PrinterExtruder:
                 "klippy:connect",
                 lambda: self.motion_queuing.check_step_generation_scan_windows())
         # Setup extruder stepper
+        # YUMI: cache des steppers concernes par le rattrapage de jeu
+        self._bl_steppers = None
+        self.printer.register_event_handler("extruder_stepper:sync",
+                                            self._handle_stepper_sync)
         self.extruder_stepper = None
         if (config.get('step_pin', None) is not None
             or config.get('dir_pin', None) is not None
@@ -432,6 +441,18 @@ class PrinterExtruder:
         if diff_r:
             return (self.instant_corner_v / abs(diff_r))**2
         return move.max_cruise_v2
+    def _handle_stepper_sync(self, stepper):
+        # YUMI: invalide le cache ; il se reconstruit au prochain mouvement.
+        self._bl_steppers = None
+    def _backlash_steppers(self):
+        # YUMI: tous les extruder_stepper actuellement lies a CETTE file, tete
+        # comprise. Reconstruit seulement quand une synchro a change (evenement
+        # extruder_stepper:sync), pas a chaque mouvement.
+        if self._bl_steppers is None:
+            self._bl_steppers = [
+                es for _, es in self.printer.lookup_objects('extruder_stepper')
+                if es.motion_queue == self.name]
+        return self._bl_steppers
     def process_move(self, print_time, move, ea_index):
         axis_r = move.axes_r[ea_index]
         accel = move.accel * axis_r
@@ -448,8 +469,12 @@ class PrinterExtruder:
         # YUMI: tell the take-up which way this move goes, BEFORE it is queued.
         # The layer then walks the gap so that it is closed exactly when this
         # move begins -- the start of the ramp is shifted, never the ramp itself.
-        if self.extruder_stepper is not None and axis_r:
-            self.extruder_stepper.note_extrude_dir(print_time - lead, axis_r)
+        # ALL steppers pushing into this queue must be told, not just the head:
+        # on a bowden it is the SYNCED FEEDER that fights the gap, and telling
+        # only self.extruder_stepper left every feeder's take-up disarmed.
+        if axis_r:
+            for es in self._backlash_steppers():
+                es.note_extrude_dir(print_time - lead, axis_r)
         self.trapq_append(self.trapq, print_time - lead,
                           move.accel_t, move.cruise_t, move.decel_t,
                           move.start_pos[ea_index], 0., 0.,
