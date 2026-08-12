@@ -79,6 +79,15 @@ class ExtruderStepper:
         # ou le jeu est ferme et tenu ferme par la pression.
         self.backlash_bleed = config.getfloat('backlash_bleed', 20., above=0.)
         self._bleed_left = 0.
+        # EXTRA LENGTH ON RESTART, cote firmware. A la difference du rattrapage,
+        # celui-ci DEPOSE de la matiere : il s'ajoute a chaque reprise et ne
+        # revient jamais. Le decalage cesse donc d'etre borne -- c'est voulu,
+        # c'est ce que fait deja le trancheur, sauf que lui l'ecrit dans le
+        # G-code. Ici Klipper ne le compte pas comme de l'extrusion : a n'utiliser
+        # que pour REGLER en direct, puis reporter la valeur dans le trancheur.
+        self.backlash_restart = config.getfloat('backlash_restart', 0.,
+                                                minval=0.)
+        self._restart_base = 0.
         # The experimental knob: multiplies the COMPUTED play. 2 doubles it, 0.5
         # halves it. Tuned live like flow, without ever touching the geometry.
         self.backlash_coef = config.getfloat('backlash_coef', 1., minval=0.,
@@ -131,6 +140,10 @@ class ExtruderStepper:
                 'backlash_accel': self.backlash_accel,
                 'backlash_deduct': self.backlash_deduct,
                 'backlash_bleed': self.backlash_bleed,
+                'backlash_restart': self.backlash_restart,
+                # Total ajoute depuis le demarrage : c'est de la matiere que
+                # Klipper ne compte pas ailleurs, autant la rendre visible.
+                'backlash_restart_total': self._restart_base,
                 'backlash_play': self._backlash_play(),
                 # Ce que le planner a REELLEMENT jalonne en dernier, et combien
                 # de fois. Sans ca, on ne peut pas distinguer "le reglage est
@@ -152,15 +165,16 @@ class ExtruderStepper:
         # decalage fige a sa derniere valeur, et il faudrait bien le rendre un
         # jour -- d'un coup, donc en cassant stepcompress.
         if play > 0. and direction < 0.:
-            target = -play          # traction : on ouvre le jeu en entier
+            target = self._restart_base - play   # traction : jeu entier
             self._bleed_left = 0.
         elif play > 0. and self._bleed_left > 0.:
             # On rend le residu au fil de l'extrusion. Tant qu'il reste de la
             # distance, la cible ne bouge pas ; une fois epuisee, elle retombe a
             # zero et la retraction suivante repartira bien de zero.
             self._bleed_left -= abs(dist)
-            target = (0. if self._bleed_left <= 0.
-                      else -min(self.backlash_deduct, play))
+            target = (self._restart_base if self._bleed_left <= 0.
+                      else self._restart_base
+                           - min(self.backlash_deduct, play))
         elif play > 0. and self.backlash_deduct > 0. \
                 and self._backlash_target == -play:
             # Retour : on repousse tout SAUF la deduction. Le decalage se REPOSE
@@ -171,10 +185,13 @@ class ExtruderStepper:
             # entre deux points fixes, il ne s'accumule jamais.
             # Premiere poussee apres une traction : on repousse tout SAUF la
             # deduction, et on arme la resorption.
-            target = -min(self.backlash_deduct, play)
+            # Reprise : c'est ICI qu'on ajoute l'extra restart, une seule fois,
+            # au moment ou on repart vraiment extruder.
+            self._restart_base += self.backlash_restart
+            target = self._restart_base - min(self.backlash_deduct, play)
             self._bleed_left = self.backlash_bleed
         else:
-            target = 0.
+            target = self._restart_base
         if target == self._backlash_target:
             return
         self._backlash_target = target
@@ -272,6 +289,8 @@ class ExtruderStepper:
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.extruder_backlash_reset(self.sk_extruder)
         self._backlash_target = 0.
+        self._restart_base = 0.
+        self._bleed_left = 0.
         motion_queuing = self.printer.lookup_object('motion_queuing')
         if not extruder_name:
             self.stepper.set_trapq(None)
@@ -350,23 +369,29 @@ class ExtruderStepper:
         b_ded = gcmd.get_float('BACKLASH_DEDUCT', self.backlash_deduct,
                                minval=0.)
         b_bld = gcmd.get_float('BACKLASH_BLEED', self.backlash_bleed, above=0.)
+        b_res = gcmd.get_float('BACKLASH_RESTART', self.backlash_restart,
+                               minval=0.)
         cur = (self.bowden_length, self.backlash_coef, self.backlash_speed,
                self.bowden_id, self.bowden_turns, self.backlash_accel,
-               self.backlash_deduct, self.backlash_bleed)
-        if (b_len, b_coef, b_speed, b_id, b_turns, b_acc, b_ded, b_bld) != cur:
+               self.backlash_deduct, self.backlash_bleed,
+               self.backlash_restart)
+        if (b_len, b_coef, b_speed, b_id, b_turns, b_acc, b_ded, b_bld,
+                b_res) != cur:
             keep = cur
             self.bowden_length, self.backlash_coef = b_len, b_coef
             self.backlash_speed = b_speed
             self.bowden_id, self.bowden_turns = b_id, b_turns
             self.backlash_accel = b_acc
             self.backlash_deduct, self.backlash_bleed = b_ded, b_bld
+            self.backlash_restart = b_res
             try:
                 self._apply_backlash(gcmd)
             except Exception:
                 # A refused setting must leave the machine exactly as it was.
                 (self.bowden_length, self.backlash_coef, self.backlash_speed,
                  self.bowden_id, self.bowden_turns, self.backlash_accel,
-                 self.backlash_deduct, self.backlash_bleed) = keep
+                 self.backlash_deduct, self.backlash_bleed,
+                 self.backlash_restart) = keep
                 raise
         motion_queuing = self.printer.lookup_object('motion_queuing')
         cur_lead = motion_queuing.get_trapq_lead(self.stepper.get_trapq())
@@ -386,13 +411,14 @@ class ExtruderStepper:
                "BACKLASH_ACCEL: %.0f mm/s2 (configurable)\n"
                "BACKLASH_DEDUCT: %.3f mm (configurable)\n"
                "BACKLASH_BLEED: %.1f mm (configurable)\n"
+               "BACKLASH_RESTART: %.3f mm (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
                   self.bowden_id, self.bowden_turns, self.backlash_coef,
                   self.backlash_speed, self.backlash_accel,
                   self.backlash_deduct, self.backlash_bleed,
-                  self._backlash_play(), self._backlash_ramp() * 1000.))
+                  self.backlash_restart, self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
