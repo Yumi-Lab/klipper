@@ -39,7 +39,7 @@
       français dans le même style que l'existant. `py_compile` + `gcc
       -fsyntax-only` obligatoires avant commit.
 
-- [ ] **Lot 4 — étendre le harnais de test avec un cas qui reproduit le bug**
+- [x] **Lot 4 — étendre le harnais de test avec un cas qui reproduit le bug**
       (si Lot 1 a abouti), ou documenter précisément le scénario de reproduction
       manuel sinon.
 
@@ -275,3 +275,74 @@
   encore le scénario dense DEDUCT/BLEED (c'est le Lot 4).
   Prochaine étape : Lot 4 — étendre `test/klippy/pressure_advance.test`
   avec le scénario dense de changement de couche.
+
+- **2026-08-13 11:40Z — codeuse, Lot 4 FAIT. Repro bout-en-bout dans le harnais
+  klippy : ROUGE sans le fix, VERT avec.** Nouveau test dédié
+  `test/klippy/backlash_layer_change.test` (+ son `.cfg`), intégré à
+  `verify.sh` (3 tests klippy désormais). Traite aussi les deux avis de la
+  revue du Lot 3 (commit `2070b5d`) : garde-fou rampe > 0 et cas E du banc.
+
+  **Scénario** (config exacte du crash : play=1,571 mm, rampe=58,9 ms,
+  DEDUCT=0,5 BLEED=10, extrudeur bowden démultiplié 95,5 pas/mm) : retrait,
+  travel court, reprise (+30 ms), 8 paliers de bleed (+5-18 ms), retrait
+  suivant (+11 ms après le dernier palier) — deux cycles. Espacements mesurés
+  dans le simulateur via instrumentation temporaire (retirée après usage) :
+  tous ≪ 58,9 ms, dont la paire retrait/reprise à 30 ms comme sur la machine.
+
+  **Deux pièges de harnais découverts en route** (à connaître pour tout futur
+  test de ce genre) : (1) `G1 E…` est ABSOLU par défaut — les « paliers » à
+  E constant étaient des no-op ou des rétractions ; il faut `M83` ;
+  (2) en mode batch, `process_move` (donc `note_extrude_dir`) est DÉFÉRÉ aux
+  flushs du lookahead : sans `M400` avant le `SET_PRESSURE_ADVANCE
+  BACKLASH_COEF=0` final, tout le scénario était planifié avec coef déjà à 0
+  → zéro flip C. Le `M400` rend la planification déterministe (coef=1).
+
+  PROOF 1 — ROUGE avec le code AVANT fix (`git show 63e3694~1:klippy/chelper/kin_extruder.c`
+  restauré en place, soit l'état `0bf594f`, toutes les autres sources à HEAD) :
+  cmd exacte : `docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src python:3.12
+  bash -c "pip install -q greenlet cffi pyserial jinja2 && python
+  scripts/test_klippy.py -d './dict' test/klippy/backlash_layer_change.test"`
+  sortie réelle (dernières lignes) :
+  ```
+  Test case test/klippy/backlash_layer_change.test FAILED (Error during test)!
+  b'stepcompress o=9 i=0 c=50 a=0: Invalid sequence'
+  ```
+  critère numérique : rc=255, message EXACT du crash de production
+  (`o=9 i=0 c=50 a=0` : 50 pas au même instant — le saut retrait→reprise,
+  ~0,5 mm × 95,5 pas/mm).
+
+  PROOF 2 — VERT avec le fix (HEAD `2070b5d`) :
+  même cmd, sortie réelle :
+  ```
+      Starting test/klippy/backlash_layer_change.test (backlash_layer_change.cfg)
+      All 1 test cases passed
+  ```
+  critère : rc=0.
+
+  PROOF 3 — `./verify.sh` complet vert à HEAD `2070b5d` :
+  sortie réelle (dernières lignes) :
+  ```
+  CONTINUITE OK : tous les cas sous le seuil.   (banc, cas E inclus)
+      Starting test/klippy/pressure_advance.test (pressure_advance.cfg)
+      Starting test/klippy/extruders.test (extruders.cfg)
+      Starting test/klippy/backlash_layer_change.test (backlash_layer_change.cfg)
+      All 3 test cases passed
+  OK
+  ```
+  critère : rc=0 ; py_compile + gcc -fsyntax-only + banc (5 cas) + 3/3 klippy.
+
+  attribution : repo HEAD `2070b5d` ; bras ROUGE = kin_extruder.c à
+  `63e3694~1` (identique à `0bf594f` pour ce fichier), tout le reste à HEAD ;
+  hôte macOS 15.2 arm64 ; conteneur `python:3.12` (Debian bookworm, gcc 13.3,
+  même image que Lots 1-3) ; dict `dict/atmega2560.dict` du Lot 1 ; chelper
+  recompilé à chaque échange de source (clé mtime, vérifié) ; date
+  2026-08-13.
+  VARIED: kin_extruder.c pré/post fix / HELD FIXED: scénario, cfg, dict,
+  code Python, harnais.
+  WHAT THIS DOES NOT SAY: ce n'est pas le replay de l'impression réelle — le
+  harnais simule le MCU atmega2560, pas la machine ; en batch les flips sont
+  insérés avec le flush loin derrière (chemin de fusion surtout) — l'entrelace
+  streaming exact de la production n'est pas reproduit ; les espacements
+  paliers (5-18 ms) sont plus denses que le réel (~20 ms) ; la validation
+  matérielle reste le gate humain du Lot 6.
+  Prochaine étape : Lot 5 — documenter cette 5ᵉ cause dans YUMI_PATCHES.md.

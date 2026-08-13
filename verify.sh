@@ -45,7 +45,8 @@ else
     docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src python:3.12 \
         bash -c "pip install -q greenlet cffi pyserial jinja2 && \
                  python scripts/test_klippy.py -d '$DICTDIR' \
-                     test/klippy/pressure_advance.test test/klippy/extruders.test"
+                     test/klippy/pressure_advance.test test/klippy/extruders.test \
+                     test/klippy/backlash_layer_change.test"
 fi
 
 echo "OK"

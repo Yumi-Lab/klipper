@@ -1,0 +1,50 @@
+# YUMI: bowden backlash take-up -- dense layer change, the "Invalid sequence"
+# crash. BACKLASH_DEDUCT + BACKLASH_BLEED active, reversals closer than the
+# 58.9 ms ramp: without the no-overlap insertion invariant, the commanded
+# offset jumps and stepcompress refuses the sequence.
+DICTIONARY atmega2560.dict
+CONFIG backlash_layer_change.cfg
+
+G28
+G1 X20 Y20 Z1 F6000
+M83
+# Exact parameters of the real crash: long ramp (58.9 ms), deduct + bleed
+SET_PRESSURE_ADVANCE ADVANCE=0 SMOOTH_TIME=0 LEAD_TIME=0 BOWDEN_LENGTH=800 BACKLASH_COEF=1 BACKLASH_SPEED=40 BACKLASH_ACCEL=15000 BACKLASH_DEDUCT=0.5 BACKLASH_BLEED=10
+# Settle into forward extrusion first
+G1 X30 E2 F3000
+# Layer change: retract, short travel, restart -- two reversals within one ramp
+G1 E-1 F6000
+G1 X30.5 F12000
+G1 E1.05 F6000
+# Bleed paliers: eight short perimeter segments hand the deduction back
+G1 X31.5 E1.25 F12000
+G1 X32.5 E1.25 F12000
+G1 X33.5 E1.25 F12000
+G1 X34.5 E1.25 F12000
+G1 X35.5 E1.25 F12000
+G1 X36.5 E1.25 F12000
+G1 X37.5 E1.25 F12000
+G1 X38.5 E1.25 F12000
+# Next retract lands right after the last palier -- the densest pair
+G1 E-1 F6000
+G1 X39 F12000
+G1 E1.05 F6000
+G1 X49 E2 F3000
+# Second cycle, like consecutive layers on a small part
+G1 E-1 F6000
+G1 X49.5 F12000
+G1 E1.05 F6000
+G1 X50.5 E1.25 F12000
+G1 X51.5 E1.25 F12000
+G1 X52.5 E1.25 F12000
+G1 X53.5 E1.25 F12000
+G1 E-1 F6000
+G1 X54 F12000
+G1 E1.05 F6000
+G1 X64 E2 F3000
+# Off with a non-zero offset pending: it must come back down its own ramp.
+# M400 first: batch mode defers process_move to lookahead flushes, and without
+# a flush here the whole scenario would be planned with coef already 0.
+M400
+SET_PRESSURE_ADVANCE BACKLASH_COEF=0
+G1 X74 E2 F3000
