@@ -281,6 +281,18 @@ class ExtruderStepper:
         ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
         if ramp > 0.:
             self._last_ramp = ramp
+        # extruder_set_backlash vient de reecrire gen_steps_pre/post_active sur
+        # CE stepper (meme champ C que le smooth_time de la PA -- "one writer,
+        # so they agree", cf. kin_extruder.c). _set_pressure_advance() prevoit
+        # motion_queuing APRES avoir touche ce champ ; _apply_backlash() ne le
+        # faisait jamais. kin_flush_delay restait donc sur l'ANCIENNE fenetre,
+        # plus etroite -> l'historique trapq est purge trop tot -> stepcompress
+        # relit du mouvement deja libere des qu'on elargit la rampe sur une
+        # couche deja active (BACKLASH_SPEED 80->50 en direct : "Internal error
+        # in stepcompress", 2026-08-13). Meme remede que la PA : re-synchroniser
+        # kin_flush_delay avec la fenetre qu'on vient d'ecrire.
+        motion_queuing = self.printer.lookup_object('motion_queuing')
+        motion_queuing.check_step_generation_scan_windows()
         # Le prochain mouvement re-jalonne la cible avec le NOUVEAU jeu : c'est
         # ce jalon qui fait redescendre (ou remonter) l'offset en douceur.
         self._backlash_target = None
