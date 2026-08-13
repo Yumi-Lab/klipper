@@ -417,3 +417,15 @@
   les Lots 2-4) ; la validation matérielle reste le gate humain du Lot 6.
   Prochaine étape : Lot 6 — écrire `.gate-handoff` (protocole de test live sur
   le pad physique) et STOP.
+
+- **2026-08-13 12:45Z — codeuse, Lot 6 : GATE PENDING.**
+  GATE PENDING: Lot 6 — pad 192.168.100.106, protocole complet dans
+  `.gate-handoff` : pull `yumi-charge-essai` à `5f7d508`+, restart klipper,
+  2 impressions ≥ 45 min à changements de couche denses avec la config EXACTE
+  du crash appliquée en direct (`BOWDEN_LENGTH=800 BACKLASH_COEF=1.0
+  BACKLASH_SPEED=40 BACKLASH_ACCEL=15000 BACKLASH_DEDUCT=0.5 BACKLASH_BLEED=10
+  SMOOTH_TIME=0 ADVANCE=0 LEAD_TIME=0`) ; PASS = aucun « Invalid sequence » /
+  « Internal error in stepcompress » sur les deux prints. Le lot reste
+  DÉCOCHÉ, pas de `.done` — tout le reste de la DoD (1-4) est fait et vérifié
+  (`./verify.sh` vert à `5f7d508` : 3/3 klippy dont la repro rouge-sans-fix,
+  banc 5 cas sous seuil). STOP en attente de l'humain.
