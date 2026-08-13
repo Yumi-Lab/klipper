@@ -10,3 +10,4 @@ klippy/.version
 .done-*
 .gate-handoff
 .env
+klippy-env/

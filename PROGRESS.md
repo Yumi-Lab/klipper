@@ -11,16 +11,14 @@
       successifs avec `BACKLASH_SPEED` différent, imprimante idle : plus de crash).
       Ce lot ne doit PAS être refait ni régressé.
 
-- [ ] **Lot 1 — obtenir un harnais de test exécutable.**
-      `python3 scripts/test_klippy.py -d <dictdir> test/klippy/pressure_advance.test`
-      échoue faute de `.dict` MCU compilé (aucun `out/` ni `*.dict` dans le repo).
-      Décision : soit produire ce dict (build simulateur/linux, voir
-      `docs/Debugging.md` upstream Klipper si présent, ou `make menuconfig` →
-      choisir l'architecture "Linux process" → `make`), soit documenter
-      précisément pourquoi ce n'est pas praticable dans le temps imparti et
-      passer au plan B (revue de code rigoureuse + compilation stricte,
-      explicitement noté comme tel dans GOAL.md/DoD point 3). Ne pas s'acharner
-      plus d'un lot dessus si ça bloque — basculer et continuer.
+- [x] **Lot 1 — obtenir un harnais de test exécutable.** ✅ FAIT (voir Journal
+      2026-08-13) : `dict/atmega2560.dict` construit en conteneur (gcc-avr),
+      `verify.sh` exécute `test_klippy.py` dans un conteneur `python:3.12` —
+      natif macOS impossible pour les deux étages (Mach-O refuse les sections
+      ELF du build MCU ; chelper inclut des en-têtes Linux-only). De plus un
+      vrai bug de build du fork a dû être corrigé : `DECL_CONSTANT_STR` avec
+      valeur vide (`CONFIG_YUMI_CONFIG`/`CONFIG_YUMI_COMMENT` vides par défaut)
+      plantait `buildcommands.py`.
 
 - [ ] **Lot 2 — tracer précisément l'enchaînement qui produit "Invalid sequence".**
       Lire `note_extrude_dir` (extruder.py) + `extruder_backlash_flip` /
@@ -58,3 +56,36 @@
 
 ## Journal
 (la codeuse et la contrôleuse ajoutent une ligne horodatée par itération significative)
+
+- **2026-08-13 08:55Z — codeuse, Lot 1 FAIT.** Harnais exécutable, 3 obstacles levés :
+  (1) `buildcommands.py` plantait le build MCU sur `DECL_CONSTANT_STR YUMI_CONFIG `
+  (valeur vide : `CONFIG_YUMI_CONFIG`/`CONFIG_YUMI_COMMENT` valent `""` par défaut dans
+  `src/Kconfig`, la concaténation de littéraux C ne laisse aucun 3ᵉ champ) → tolérance
+  chaîne vide ajoutée ; (2) build `.dict` impossible en natif macOS (Mach-O refuse
+  `__section(".compile_time_request")`, cible ELF requise) → build en conteneur
+  `debian:bookworm-slim` + gcc-avr → `dict/atmega2560.dict` ; (3) chelper non compilable
+  natif macOS (`pyhelper.c`: `<sys/prctl.h>`, `serialqueue.c`: `<linux/can.h>`) → harnais
+  exécuté dans conteneur `python:3.12` via `verify.sh` (gitignore : `klippy-env/`).
+
+  PROOF :
+  cmd exacte : `./verify.sh` — qui lance
+  `docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src python:3.12 bash -c "pip install -q greenlet cffi pyserial jinja2 && python scripts/test_klippy.py -d './dict' test/klippy/pressure_advance.test test/klippy/extruders.test"`
+  sortie réelle (dernières lignes) :
+  ```
+      Starting test/klippy/pressure_advance.test (pressure_advance.cfg)
+      Starting test/klippy/extruders.test (extruders.cfg)
+
+      All 2 test cases passed
+  OK
+  ```
+  critère numérique : rc=0, 2/2 tests passés.
+  attribution : repo `636ef85` + fix buildcommands du jour ; hôte macOS 15.2 arm64,
+  Apple clang 16.0.0 ; conteneur `python@sha256:dd4fe98a…` (Debian bookworm, python 3.12) ;
+  dict construit avec avr-gcc bookworm depuis `test/configs/atmega2560.config` ;
+  date 2026-08-13T08:54Z.
+  VARIED: — (mise en service, premier run vert) / HELD FIXED: code klippy, fichiers de test.
+  WHAT THIS DOES NOT SAY: ne reproduit PAS le crash « Invalid sequence » (scénario dense
+  de changement de couche = Lot 2/4) ; harnais hôte seul, aucun timing MCU réel ; le cas
+  backlash existant (`BOWDEN_LENGTH=800 BACKLASH_COEF=1`) passe mais n'exerce pas
+  `BACKLASH_DEDUCT`/`BACKLASH_BLEED` en séquence dense.
+  Prochaine étape : Lot 2 — tracer l'enchaînement exact de jalons qui produit le crash.
