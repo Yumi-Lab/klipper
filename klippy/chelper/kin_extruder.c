@@ -156,6 +156,12 @@ struct backlash_params {
     struct list_node node;
 };
 
+// Plancher defensif pour la rampe raccourcie a l'insertion : jamais nulle,
+// sinon backlash_lookup retombe sur la rampe courante (cf. le commentaire du
+// garde-fou dans extruder_backlash_flip). 1 us : sous tout echantillonnage
+// de generation de pas, donc sans effet mesurable -- l'invariant seul compte.
+#define BACKLASH_MIN_RAMP 0.000001
+
 // Offset at `print_time`: hold the current target, and ramp toward the next one
 // so the ramp LANDS on the reversal instead of starting there. That is the whole
 // point -- the gap must be walked before the real extrusion begins, not during.
@@ -303,6 +309,19 @@ extruder_backlash_flip(struct stepper_kinematics *sk, double print_time
             // monte (1,5*delta/ramp) -- un a-coup possible, jamais un saut :
             // la continuite prime sur le confort moteur.
             ramp = print_time - last->print_time;
+            // Garde-fou : deux flips au MEME print_time donneraient une rampe
+            // nulle, et backlash_lookup retomberait alors sur la rampe
+            // COURANTE (`bp->ramp > 0. ? bp->ramp : ramp`) -- la transition
+            // serait interpolee avec la rampe d'une autre epoque si
+            // BACKLASH_SPEED a change entre-temps, exactement le piege du
+            // fix 0bf594f ("chaque jalon porte SA rampe"). Le planner
+            // produit des print_time strictement croissants (un flip exige
+            // un move extrudant, donc une duree), ce cas est donc purement
+            // defensif : une micro-rampe preserve l'invariant sans rien
+            // changer au comportement (a print_time egaux, le balayage de
+            // backlash_lookup saute ce jalon, sa rampe n'est jamais lue).
+            if (ramp < BACKLASH_MIN_RAMP)
+                ramp = BACKLASH_MIN_RAMP;
             break;
         }
         // `last` est entierement dans le futur (sa fenetre n'a pas encore ete

@@ -37,23 +37,33 @@ double move_get_distance(struct move *m, double move_time)
 
 // Rejoue une sequence de jalons (cible, print_time) et mesure le plus grand
 // ecart d'offset entre deux echantillons consecutifs de backlash_lookup.
-// flush_back_frac positionne le flush simule derriere le jalon precedent
-// (1.0 = une rampe entiere -> chemin de fusion ; 0.5 = generation DEJA dans
-// la fenetre precedente -> chemin de raccourcissement de rampe).
+// flush_back_frac positionne le flush simule derriere un jalon, exprime en
+// fraction de rampe. flush_rel_current choisit la reference :
+//   0 -> derriere le jalon PRECEDENT (1.0 = une rampe entiere -> chemin de
+//        fusion ; 0.5 = generation DEJA dans la fenetre precedente -> chemin
+//        de raccourcissement de rampe) ;
+//   1 -> derriere le jalon COURANT : 1.0 est alors la position LEGALE la
+//        plus avancee du flush (generation a exactement kin_flush_delay =
+//        une rampe du bord de planification), le cas "head entame + flip
+//        dense" de la revue.
 // Retourne le saut max en PAS.
 static double run_case(const char *name, double play, double ramp,
                        const double (*flips)[2], int n,
-                       double t0, double t1, double flush_back_frac)
+                       double t0, double t1, double flush_back_frac,
+                       int flush_rel_current)
 {
     struct stepper_kinematics *sk = extruder_stepper_alloc();
     struct extruder_stepper *es = container_of(sk, struct extruder_stepper, sk);
     extruder_set_backlash(sk, play, ramp);
     extruder_backlash_reset(sk);
     for (int i = 0; i < n; i++) {
-        // la generation de pas suit derriere le planner : dernier flush un
-        // peu avant le jalon precedent.
-        sk->last_flush_time = (i > 0 ? flips[i-1][1] : t0)
-                              - ramp * flush_back_frac;
+        // la generation de pas suit derriere le planner.
+        double ref = flips[i][1];
+        if (!flush_rel_current && i > 0)
+            ref = flips[i-1][1];
+        else if (!flush_rel_current)
+            ref = t0;
+        sk->last_flush_time = ref - ramp * flush_back_frac;
         extruder_backlash_flip(sk, flips[i][1], flips[i][0], ramp);
     }
     double prev = backlash_lookup(&es->bl_list, t0, ramp);
@@ -106,7 +116,7 @@ int main(void)
         {-1.5708, 1.175},   // retraction suivante (20 ms apres le palier 0)
     };
     double a = run_case("A dense (chgt couche, fusion)", play, ramp,
-                        dense, 8, 0.90, 1.30, 1.0);
+                        dense, 8, 0.90, 1.30, 1.0, 0);
 
     // CAS B — controle : memes cibles, jalons espaces de 200 ms (> rampe).
     // Bras de REFERENCE du meme run : le code est innocent hors recouvrement.
@@ -121,18 +131,32 @@ int main(void)
         {-1.5708, 2.400},
     };
     double b = run_case("B controle (jalons > rampe)", play, ramp,
-                        spaced, 8, 0.90, 2.55, 1.0);
+                        spaced, 8, 0.90, 2.55, 1.0, 0);
 
     // CAS C — dense mais avec la rampe par defaut (SPEED=120 -> 19.6 ms).
     double c = run_case("C dense, rampe defaut 19.6ms", play, 0.0196,
-                        dense, 8, 0.90, 1.30, 1.0);
+                        dense, 8, 0.90, 1.30, 1.0, 0);
 
     // CAS D — dense, flush DANS la fenetre precedente (une demi-rampe
     // derriere) : la generation a deja commence a suivre la rampe du jalon
     // precedent, la fusion est interdite -> exerce le chemin de
     // RACCOURCISSEMENT de la nouvelle rampe.
     double d = run_case("D dense, flush mi-fenetre", play, ramp,
-                        dense, 8, 0.90, 1.30, 0.5);
+                        dense, 8, 0.90, 1.30, 0.5, 0);
+
+    // CAS E — flush a la position LEGALE la plus avancee : la generation
+    // suit le bord de planification a exactement kin_flush_delay = une rampe
+    // (la fenetre de scan vaut la rampe quand le backlash est actif, cf.
+    // extruder_update_scan_window). Chaque insertion se fait donc avec le
+    // flush une rampe derriere le jalon COURANT : marge minimale garantie
+    // par le contrat du planner (print_time >= flush + kin_flush_delay).
+    // C'est la borne du cas "head entame + flip dense" souleve en revue :
+    // le nettoyage maintient la tete a print_time < flush - backlash_ramp,
+    // donc start = print_time - ramp >= flush > tete -- le recouvrement avec
+    // la tete est structurellement hors de portee, et ce cas prouve que la
+    // limite reste continue.
+    double e = run_case("E dense, flush au bord legal", play, ramp,
+                        dense, 8, 0.90, 1.30, 1.0, 1);
 
     // Seuil : voir l'en-tete. Bras de reference B mesure dans CE run.
     double seuil = 4. * b;
@@ -145,6 +169,7 @@ int main(void)
     if (a > seuil) { printf("ECHEC cas A : %.2f pas > %.2f\n", a, seuil); bad = 1; }
     if (c > seuil) { printf("ECHEC cas C : %.2f pas > %.2f\n", c, seuil); bad = 1; }
     if (d > seuil) { printf("ECHEC cas D : %.2f pas > %.2f\n", d, seuil); bad = 1; }
+    if (e > seuil) { printf("ECHEC cas E : %.2f pas > %.2f\n", e, seuil); bad = 1; }
     if (b > seuil) { printf("ECHEC bras de reference B : %.2f pas > %.2f"
                             " — le SEUIL est en defaut, pas le produit\n",
                             b, seuil); bad = 1; }
