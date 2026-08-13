@@ -97,6 +97,46 @@ l'instant de l'inversion**, maintien pendant la traction, et fenêtre réclamée
 **Ni le jeu ni τ ne sont mesurés sur une machine à ce jour** : `backlash_coef` se
 cale à l'impression, c'est sa raison d'être.
 
+### Les arrêts machine rencontrés (et ce qui les a fixés)
+
+Cinq classes de crash « Internal error in stepcompress » / « Invalid sequence »
+rencontrées sur la couche de rattrapage, dans l'ordre. La règle d'or transversale :
+la position commandée doit rester **continue**, et toute fenêtre élargie exige une
+resync — deux propriétés à **imposer**, jamais à supposer.
+
+1. **Faux jalons qui se chevauchent** (`b38e1ef`) — la résorption proportionnelle
+   posait jusqu'à ~450 jalons/seconde ; ils se chevauchaient, l'offset tremblait.
+   Fix : un nombre FIXE de 8 paliers (`BACKLASH_BLEED_STEPS`).
+2. **Chaque jalon porte sa propre rampe** (`0bf594f`) — interpoler un vieux jalon
+   avec la rampe COURANTE (vitesse/accel changées entre-temps) faisait sauter
+   l'offset. Fix : `struct backlash_params` embarque son `ramp`.
+3. **Offset non nul au changement de paramètre** (`95e3217`) — retoucher un
+   paramètre alors que l'offset n'est pas à zéro faisait sauter la position.
+   Fix : `_apply_backlash` ramène l'offset à zéro PAR SA RAMPE avant tout
+   changement, si la cible est non nulle.
+4. **Fenêtre de scan non resynchronisée** (`e98c567`) — `extruder_set_backlash`
+   réécrit `gen_steps_pre/post_active` (même champ C que le `smooth_time` du PA)
+   sans appeler `motion_queuing.check_step_generation_scan_windows()` :
+   `kin_flush_delay` restait figé sur la fenêtre précédente, plus étroite, et
+   l'historique trapq était purgé sous les pas. **Ne jamais** élargir
+   `gen_steps_pre/post_active` sans resync — le même piège que `lead_time`.
+5. **Recouvrement des fenêtres de rampe** (`63e3694`, `2070b5d` ; repro bout-en-bout
+   `500857b`) — `backlash_lookup` suppose que la rampe vers un jalon a **atterri**
+   avant que celle du suivant ne démarre. Sur un changement de couche dense
+   (retrait, reprise à −deduct, paliers de bleed), deux jalons tombent à moins
+   d'une rampe l'un de l'autre : au `print_time` du jalon du milieu, la paire
+   active bascule et l'offset SAUTE (1,15 mm mesurés au banc, 460 pas) →
+   stepcompress refuse la discontinuité. Fix : l'invariant est imposé **à
+   l'insertion** — si la fenêtre du nouveau jalon recouvre l'atterrissage du
+   précédent, celui-ci est supplanté quand sa fenêtre est entièrement dans le
+   futur (fusion) ; sinon la nouvelle rampe est raccourcie pour démarrer pile à
+   son atterrissage. Les rampes ne font que rétrécir : la fenêtre de scan
+   déclarée reste valide, aucune resync requise. Couvert par
+   `scripts/backlash_overlap_bench.c` (banc de continuité, seuil relatif au bras
+   de référence du même run) et `test/klippy/backlash_layer_change.test`
+   (scénario dense de changement de couche — rouge sans le fix avec la signature
+   exacte de production, vert avec).
+
 ### Ce que fait lead_time
 - `lead_time` (config `[extruder]` ou `SET_PRESSURE_ADVANCE EXTRUDER=... LEAD_TIME=`)
   décale dans le temps le contenu du trapq extrudeur au niveau **planner**

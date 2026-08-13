@@ -43,8 +43,12 @@
       (si Lot 1 a abouti), ou documenter précisément le scénario de reproduction
       manuel sinon.
 
-- [ ] **Lot 5 — mettre à jour `YUMI_PATCHES.md`** avec cette 5ᵉ cause, même
-      registre d'écriture que les 4 précédentes.
+- [x] **Lot 5 — mettre à jour `YUMI_PATCHES.md`** avec cette 5ᵉ cause, même
+      registre d'écriture que les 4 précédentes. ✅ FAIT (voir Journal
+      2026-08-13 12:40Z) : section « Les arrêts machine rencontrés » ajoutée
+      (5 causes, commits et fix de chacune). Traite aussi les deux avis de la
+      revue du Lot 4 : image/pip épinglés dans `verify.sh`, et
+      `scripts/build-dict.sh` rend `dict/atmega2560.dict` régénérable.
 
 - [ ] **Lot 6 — GATE HUMAIN (matériel réel).** Écrire `.gate-handoff` avec :
       la config backlash exacte à appliquer, le G-code/print à lancer, la durée
@@ -346,3 +350,70 @@
   paliers (5-18 ms) sont plus denses que le réel (~20 ms) ; la validation
   matérielle reste le gate humain du Lot 6.
   Prochaine étape : Lot 5 — documenter cette 5ᵉ cause dans YUMI_PATCHES.md.
+
+- **2026-08-13 12:40Z — codeuse, Lot 5 FAIT. `YUMI_PATCHES.md` documente la
+  5ᵉ cause** (section « Les arrêts machine rencontrés (et ce qui les a fixés) »,
+  après « Ce que fait le rattrapage de jeu ») : les 5 classes de crash dans
+  l'ordre, avec commit et fix de chacune, et la règle d'or transversale
+  (continuité à imposer, fenêtre élargie ⇒ resync). Aucun code touché.
+
+  **Les deux avis de la revue du Lot 4 sont traités dans la foulée** (petits,
+  liés au harnais, exigés « avant le .done ou documentés acceptés ») :
+  (1) `verify.sh` — image épinglée par digest
+  (`python@sha256:dd4fe98ab39f91e9…`, celle du Lot 1) et paquets pip épinglés
+  (greenlet==3.5.5 cffi==2.1.1 pyserial==3.5 jinja2==3.1.6, versions résolues
+  dans cette image le 2026-08-13) — le harnais ne dérive plus au gré des
+  publications PyPI/Docker Hub ; (2) `scripts/build-dict.sh` (nouveau,
+  exécutable) régénère `dict/atmega2560.dict` en conteneur
+  `debian@sha256:7b140f374b…` (bookworm-slim épinglé) + gcc-avr, dans une
+  copie /tmp pour ne pas écraser le `.config`/`out/` de l'arbre (ils
+  appartiennent au build STM32). `shlint.sh` vert sur les deux scripts.
+
+  PROOF 1 — le dict est régénérable et le script fonctionne :
+  cmd exacte : `cp dict/atmega2560.dict /tmp/atmega2560.dict.bak &&
+  ./scripts/build-dict.sh && python3 -c '<diff json des deux dicts>'`
+  sortie réelle (dernières lignes) :
+  ```
+    Linking out/klipper.elf
+  dict/atmega2560.dict regenere depuis test/configs/atmega2560.config.
+  clefs seulement nouveau: [] ; clefs seulement ancien: []
+  valeurs differentes: 1 ['version']
+  ```
+  critère numérique : rc=0, dict régénéré fonctionnellement IDENTIQUE à celui
+  du Lot 1 (mêmes clefs, mêmes valeurs ; seule la chaîne `version` — horodatage
+  + hash de build — diffère). Premier essai rouge (« make: python3: No such
+  file or directory ») : bookworm-slim n'a pas python3, ajouté à l'apt du
+  script — c'est exactement le genre de dérive que l'avis visait.
+  Note : `scripts/check-gcc.sh: readelf: not found` pendant le build est un
+  avertissement non fatal du Makefile upstream (vérification de version gcc),
+  le link et la génération du dict aboutissent (rc=0).
+
+  PROOF 2 — `./verify.sh` complet vert avec le dict RÉGÉNÉRÉ et l'image/pip
+  ÉPINGLÉS (HEAD `500857b` + ce lot) :
+  cmd exacte : `./verify.sh`
+  sortie réelle (dernières lignes) :
+  ```
+  seuil (meme run) = 1.00 pas  (4x controle B=0.16, plancher 1)
+  CONTINUITE OK : tous les cas sous le seuil.
+  == test_klippy.py via docker (dict: ./dict/atmega2560.dict) ==
+      Starting test/klippy/pressure_advance.test (pressure_advance.cfg)
+      Starting test/klippy/extruders.test (extruders.cfg)
+      Starting test/klippy/backlash_layer_change.test (backlash_layer_change.cfg)
+      All 3 test cases passed
+  OK
+  ```
+  critère numérique : rc=0 ; py_compile + gcc -fsyntax-only (6 warnings
+  `externally_visible` ignorés par Apple clang, préexistants et sans effet) +
+  banc 5 cas (A=0,16 / D=0,22 / E=0,22 pas sous seuil 1,00 du même run) +
+  3/3 tests klippy dans l'image épinglée avec les pip épinglés.
+  attribution : repo HEAD `500857b` + fichiers de ce lot (YUMI_PATCHES.md,
+  verify.sh, scripts/build-dict.sh, dict régénéré) ; hôte macOS 15.2 arm64,
+  Apple clang 16.0.0 via `cc`, -O2 ; images docker épinglées par digest (cf.
+  ci-dessus) ; date 2026-08-13T12:39Z.
+  VARIED: dict (régénéré vs Lot 1), versions pip (épinglées vs flottantes) /
+  HELD FIXED: code klippy sous test, scénarios de test, hôte.
+  WHAT THIS DOES NOT SAY: lot de documentation et de reproductibilité du
+  harnais — il ne valide rien de plus sur le bug lui-même (déjà couvert par
+  les Lots 2-4) ; la validation matérielle reste le gate humain du Lot 6.
+  Prochaine étape : Lot 6 — écrire `.gate-handoff` (protocole de test live sur
+  le pad physique) et STOP.

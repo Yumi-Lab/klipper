@@ -42,8 +42,13 @@ elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 else
     DICTDIR=$(dirname "$DICT")
     echo "== test_klippy.py via docker (dict: $DICT) =="
-    docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src python:3.12 \
-        bash -c "pip install -q greenlet cffi pyserial jinja2 && \
+    # Image et paquets epingles (revue Lot 4) : le harnais ne doit pas deriver
+    # au gre des publications PyPI/Docker Hub. Digest python:3.12 et versions
+    # captures le 2026-08-13 (Lot 1) ; a revoir sciemment, jamais par accident.
+    PYIMG=python@sha256:dd4fe98ab39f91e936f8e7e7a65a3ce59ecfb11e32f9a125b3132779920ba7f7
+    docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src "$PYIMG" \
+        bash -c "pip install -q greenlet==3.5.5 cffi==2.1.1 pyserial==3.5 \
+                 jinja2==3.1.6 && \
                  python scripts/test_klippy.py -d '$DICTDIR' \
                      test/klippy/pressure_advance.test test/klippy/extruders.test \
                      test/klippy/backlash_layer_change.test"
