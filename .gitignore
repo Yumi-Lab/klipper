@@ -4,3 +4,9 @@ out
 .config
 .config.old
 klippy/.version
+.monitor/
+.loop/
+.done
+.done-*
+.gate-handoff
+.env
