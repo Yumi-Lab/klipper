@@ -20,7 +20,7 @@
       valeur vide (`CONFIG_YUMI_CONFIG`/`CONFIG_YUMI_COMMENT` vides par défaut)
       plantait `buildcommands.py`.
 
-- [ ] **Lot 2 — tracer précisément l'enchaînement qui produit "Invalid sequence".**
+- [x] **Lot 2 — tracer précisément l'enchaînement qui produit "Invalid sequence".**
       Lire `note_extrude_dir` (extruder.py) + `extruder_backlash_flip` /
       `backlash_lookup` (kin_extruder.c) en détail. Construire (sur le papier ou
       en test) une séquence de mouvements représentative d'un changement de
@@ -89,3 +89,95 @@
   backlash existant (`BOWDEN_LENGTH=800 BACKLASH_COEF=1`) passe mais n'exerce pas
   `BACKLASH_DEDUCT`/`BACKLASH_BLEED` en séquence dense.
   Prochaine étape : Lot 2 — tracer l'enchaînement exact de jalons qui produit le crash.
+
+- **2026-08-13 09:25Z — codeuse, Lot 2 FAIT. Cause racine identifiée.**
+
+  **Mécanisme.** `backlash_lookup` (kin_extruder.c:167) modélise chaque
+  transition comme « offset tenu à `prev->target` jusqu'à `bp->print_time -
+  bp->ramp`, puis rampe en S vers `bp->target` ». Quand deux jalons sont
+  espacés de MOINS que la rampe (Δt < ramp), la fenêtre de la 2ᵉ transition
+  commence AVANT l'atterrissage de la 1ʳᵉ : au `print_time` du jalon du
+  milieu, la paire active devient (milieu, suivant) et l'interpolation est
+  évaluée à u = 1 − Δt/ramp > 0 → l'offset SAUTE instantanément de
+  `(target_suivant − target_milieu) · f(1 − Δt/ramp)` (f = profil en S).
+  Saut de position → itersolve place N>1 pas au même instant → stepcompress
+  `check_line` refuse (`interval=0, add=0, count>1`, stepcompress.c:219,
+  CHECK_LINES=1 compilé en dur) → « Invalid sequence ». La signature
+  observée `o=5 i=0 c=12 a=0` colle : il suffit d'un saut ≥ 2 pas (≈ 5 µm à
+  400 pas/mm) ; les sauts mesurés vont de 13 µm à 1,15 mm.
+
+  **Pourquoi un changement de couche, avec DEDUCT/BLEED, après ~37 min.** La
+  rampe de la config du crash est LONGUE (58,9 ms à BACKLASH_SPEED=40, vs
+  19,6 ms au défaut 120) → fenêtre de recouvrement 3× plus large. Un
+  changement de couche sur petite pièce empile : retrait (−jeu) → reprise
+  20-55 ms plus tard (−deduct) → paliers de bleed toutes les ~10-30 ms
+  (segments courts rapides) → retrait suivant parfois 20 ms après le dernier
+  palier (Δtarget = jeu entier). Chaque paire < rampe = un saut. Sans
+  DEDUCT/BLEED il n'y a que la paire retrait/reprise (souvent > rampe sauf
+  toutes petites pièces) ; avec, 8 paliers × chaque couche multiplient les
+  occasions. Il faut une densité suffisante → délai avant le premier saut
+  assez gros. Piste (d) écartée par le calcul : accélération de crête du
+  profil en S = 6·1,5708/0,0589² ≈ 2717 mm/s², très sous BACKLASH_ACCEL=15000
+  (et la crête de vitesse est 40 mm/s, la limite déclarée) — aucune borne
+  physique implicite dépassée.
+
+  **Invariants nommés dans la case vérifiés et NON en cause** : (a) le
+  nettoyage d'`extruder_backlash_flip` est sûr — il conserve toujours le
+  dernier jalon antérieur à `last_flush_time − ramp` (plancher) et la
+  génération de pas ne lit jamais en arrière de la tête de flush telle
+  qu'elle valait au moment du nettoyage (tête monotone, même thread) ;
+  (c) les insertions sont triées — `process_move` appelle `note_extrude_dir`
+  dans l'ordre croissant des `print_time` (lead=0, une seule file). L'invariant
+  RÉELLEMENT violé est la **continuité de la position commandée**.
+
+  PROOF :
+  cmd exacte : `cc -O2 -w -I klippy/chelper -o .loop/tmp/bl_overlap_bench
+  .loop/tmp/bl_overlap_bench.c -lm && .loop/tmp/bl_overlap_bench`
+  (banc C ad hoc, scratch non commité, qui `#include` le VRAI
+  `klippy/chelper/kin_extruder.c` de ce commit et rejoue les séquences de
+  jalons ; cibles calculées selon la logique de `note_extrude_dir`, config
+  exacte du crash : play=1,5708 mm, ramp=58,9 ms, deduct=0,5, bleed=10)
+  sortie réelle (extraits) :
+  ```
+  A dense (chgt couche, crash)       play=1.5708 ramp=58.9ms jalons=8
+    saut max = 1.150457 mm @ t=1.1550 s  = 460.18 pas @ 400 pas/mm
+      jalon 6 t=1.155 cible=+0.0000 : -0.000001 -> -1.150457  ecart=-1.150456 mm
+      jalon 2 t=1.075 cible=-0.4375 : -0.437501 -> -0.345950  ecart=+0.091551 mm
+      jalon 1 t=1.055 cible=-0.5000 : -0.500009 -> -0.454225  ecart=+0.045784 mm
+  B controle (jalons > rampe)        play=1.5708 ramp=58.9ms jalons=8
+    saut max = 0.002000 mm @ t=2.3706 s  = 0.80 pas @ 400 pas/mm
+      (tous les ecarts de jalons ≈ 0 : ±0,000014 mm max)
+  C dense, rampe defaut 19.6ms       play=1.5708 ramp=19.6ms jalons=8
+      (aucun ecart de jalon > 0,0002 mm : le « 2,40 pas » du saut max est la
+       pente LÉGITIME de la rampe à 120 mm/s échantillonnée à 50 µs, pas une
+       discontinuité)
+  ```
+  critère numérique : discontinuité au `print_time` d'un jalon du milieu =
+  1,150 mm (≈ 460 pas à 400 pas/mm) ≫ seuil de refus stepcompress (> 1 pas à
+  intervalle 0) ; bras de référence MÊME RUN (mêmes cibles, jalons espacés >
+  rampe) : écart max 0,8 pas → continu — le code est innocent hors
+  recouvrement, c'est bien le recouvrement qui tue.
+  attribution : repo HEAD `1f1a3c4` (code sous test = kin_extruder.c de ce
+  commit, inclus littéralement par le banc) ; hôte macOS 15.2 arm64, Apple
+  clang 16.0.0 via `cc`, -O2 ; banc `.loop/tmp/bl_overlap_bench.c` (scratch
+  non commité, rejouable tel quel) ; échantillonnage 50 µs ; date
+  2026-08-13.
+  VARIED: espacement des jalons (20-55 ms vs 200 ms) et rampe (58,9 ms vs
+  19,6 ms) / HELD FIXED: code sous test, play=1,5708 mm, séquence de cibles
+  issue de la config du crash.
+  WHAT THIS DOES NOT SAY: la séquence exacte de flips de l'impression réelle
+  est inconnue — le banc démontre le MÉCANISME, pas le replay du print ; le
+  chemin complet itersolve→stepcompress n'est pas exécuté ici (repro
+  bout-en-bout via le harnais klippy = Lot 4) ; 400 pas/mm est une hypothèse
+  — les sauts de 45-92 µm crashent dès ~45 pas/mm, le plus petit (13 µm) dès
+  ~154 pas/mm, donc sous toute résolution d'extrudeur réaliste ; aucun fix
+  n'est validé ici.
+  Conclusion : la cause est le **recouvrement des fenêtres de rampe** dans
+  `backlash_lookup` quand Δt < ramp — discontinuité de la position commandée.
+  Le fix `b38e1ef` (8 paliers fixes) traitait le TAUX de jalons, pas le
+  recouvrement : 8 paliers restent plus denses que la rampe sur segments
+  rapides, et la paire retrait/reprise peut l'être aussi.
+  Prochaine étape : Lot 3 — conception du fix (pistes : ancrer la base de
+  chaque rampe à la trajectoire réelle au début de sa fenêtre, ou fusionner
+  les jalons plus proches que la rampe à l'insertion ; choix à trancher avec
+  le banc ci-dessus comme critère avant/après).
