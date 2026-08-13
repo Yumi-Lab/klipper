@@ -33,7 +33,7 @@
       stepcompress peut relire" est violé. Écrire la conclusion dans le Journal
       ci-dessous AVANT de coder le fix (pas de fix sans cause identifiée).
 
-- [ ] **Lot 3 — implémenter le fix.**
+- [x] **Lot 3 — implémenter le fix.**
       Doit respecter YUMI_PATCHES.md (jamais élargir `gen_steps_pre/post_active`
       sans `motion_queuing.check_step_generation_scan_windows()`). Commenté en
       français dans le même style que l'existant. `py_compile` + `gcc
@@ -181,3 +181,97 @@
   chaque rampe à la trajectoire réelle au début de sa fenêtre, ou fusionner
   les jalons plus proches que la rampe à l'insertion ; choix à trancher avec
   le banc ci-dessus comme critère avant/après).
+
+- **2026-08-13 10:05Z — codeuse, Lot 3 FAIT. Fix : l'invariant de
+  non-recouvrement est imposé À L'INSERTION du jalon** (`63e3694`,
+  `klippy/chelper/kin_extruder.c`, fonction `extruder_backlash_flip`).
+
+  **Choix de conception** (parmi les deux pistes du Lot 2). L'ancrage de la
+  base de chaque rampe à la trajectoire réelle a été écarté : la récursion
+  qu'il exige dans `backlash_lookup` lit des jalons en arrière de la
+  rétention du nettoyage (`last_flush_time − ramp`) sur les longues chaînes
+  de paliers — il aurait fallu retoucher la rétention, au risque de rouvrir
+  la classe de bug n°4. La **fusion à l'insertion** garde `backlash_lookup`
+  STRICTEMENT inchangé : on enforce l'invariant qu'il supposait déjà. Règle :
+  si la fenêtre du nouveau jalon (`print_time − ramp`) démarre avant
+  l'atterrissage du précédent, (1) le précédent est SUPPLANTÉ quand sa
+  fenêtre est entièrement dans le futur (`last_start ≥ last_flush_time` —
+  rien d'émis ne la suivait, sa cible ne serait jamais atteinte) ; (2) sinon
+  — génération déjà entrée dans sa fenêtre — la NOUVELLE rampe est
+  raccourcie pour démarrer pile à son atterrissage (à cet instant f(0)=0 et
+  la base vaut `last->target` : continu des deux côtés ; la pointe de vitesse
+  monte, un à-coup possible mais jamais un saut — la continuité prime).
+  Conséquence physique assumée : quand les flips sont plus denses que la
+  rampe, la marche du jeu n'était de toute façon pas physiquement
+  réalisable (1,57 mm aller-retour en 20 ms à 40 mm/s) ; l'offset suit alors
+  une rampe unique vers la cible la plus récente. Les rampes ne font que
+  RÉTRÉCIR → la fenêtre de scan déclarée (`backlash_ramp`) reste valide,
+  aucune resync nécessaire (YUMI_PATCHES respecté). Côté Python : rien —
+  les cibles de `note_extrude_dir` sont absolues, sans dérive.
+  Non-régression des 4 fixes précédents vérifiée par lecture : paliers
+  fixes (b38e1ef) inchangés, rampe par jalon (0bf594f) inchangée,
+  `_apply_backlash` (95e3217) passe par le même flip désormais continu,
+  resync de fenêtre (e98c567) non impactée.
+
+  **Le banc est désormais commité** (`scripts/backlash_overlap_bench.c`,
+  avis du reviewer) et intégré à `verify.sh`, avec critère de gate relatif
+  au bras de référence du MÊME RUN (max(1 pas, 4× contrôle) ; origine du
+  seuil en en-tête du fichier). Un 4ᵉ cas (D) exerce le chemin de
+  raccourcissement (flush simulé DANS la fenêtre précédente).
+
+  PROOF 1 — le banc détecte le bug sur le code AVANT fix (HEAD `c24dd73`,
+  banc commité, fix pas encore appliqué) :
+  cmd exacte : `cc -O2 -w -I klippy/chelper -o .loop/tmp/bl_overlap_bench
+  scripts/backlash_overlap_bench.c -lm && .loop/tmp/bl_overlap_bench`
+  sortie réelle (extraits) :
+  ```
+  A dense (chgt couche, fusion)  saut max = 1.150457 mm = 460.18 pas
+      jalon 6 t=1.155 cible=+0.0000 : -0.000001 -> -1.150457  ecart=-1.150456 mm
+  D dense, flush mi-fenetre      saut max = 1.150457 mm = 460.18 pas
+  B controle = 0.16 pas ; C = 0.48 pas
+  seuil (meme run) = 1.00 pas
+  ECHEC cas A ; ECHEC cas D ; rc=1
+  ```
+  critère numérique : rc=1, cas denses 460 pas > seuil 1 pas — le gate est
+  bien ROUGE sans le fix (donc il mesure quelque chose).
+
+  PROOF 2 — le banc passe APRÈS fix (HEAD `63e3694`) :
+  même cmd, sortie réelle (extraits) :
+  ```
+  A dense (chgt couche, fusion)  saut max = 0.000400 mm = 0.16 pas
+  D dense, flush mi-fenetre      saut max = 0.000542 mm = 0.22 pas
+  B controle = 0.16 pas ; C = 0.48 pas   (INCHANGÉS : pas de régression)
+  CONTINUITE OK : tous les cas sous le seuil. rc=0
+  ```
+  critère numérique : 460,18 pas → 0,16 pas (fusion) / 0,22 pas
+  (raccourcissement), sous le seuil de 1 pas ; bras de contrôle identiques
+  avant/après → le fix n'a pas altéré les cas qui marchaient.
+  attribution : hôte macOS 15.2 arm64, Apple clang 16.0.0 via `cc`, -O2 ;
+  échantillonnage 10 µs (sous la pente légitime la plus raide, 120 mm/s =
+  0,48 pas/échantillon) ; date 2026-08-13.
+  VARIED: code sous test (avant/après fix) / HELD FIXED: séquences de
+  cibles, play=1,5708 mm, rampes 58,9/19,6 ms, modèle de flush.
+  WHAT THIS DOES NOT SAY: la séquence exacte de l'impression réelle reste
+  inconnue — le banc démontre la continuité sur une séquence dense
+  représentative, pas le replay du print ; le chemin complet
+  itersolve→stepcompress n'est pas exécuté ici (= Lot 4) ; 400 pas/mm est
+  une hypothèse (le saut d'origine, 1,15 mm, crashe dès ~2 pas/mm, donc
+  sous toute résolution réaliste) ; la validation matérielle reste le
+  gate humain du Lot 6.
+
+  PROOF 3 — `./verify.sh` complet vert APRÈS fix (HEAD `63e3694`) :
+  sortie réelle (dernières lignes) :
+  ```
+  CONTINUITE OK : tous les cas sous le seuil.
+  == test_klippy.py via docker (dict: ./dict/atmega2560.dict) ==
+      Starting test/klippy/pressure_advance.test (pressure_advance.cfg)
+      Starting test/klippy/extruders.test (extruders.cfg)
+      All 2 test cases passed
+  OK
+  ```
+  critère : rc=0 ; py_compile + gcc -fsyntax-only + banc + 2/2 tests
+  klippy docker. Attribution identique au Lot 1 (même dict, même image
+  python:3.12). WHAT THIS DOES NOT SAY: le harnais klippy n'exerce pas
+  encore le scénario dense DEDUCT/BLEED (c'est le Lot 4).
+  Prochaine étape : Lot 4 — étendre `test/klippy/pressure_advance.test`
+  avec le scénario dense de changement de couche.
