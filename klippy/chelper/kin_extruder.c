@@ -279,6 +279,41 @@ extruder_backlash_flip(struct stepper_kinematics *sk, double print_time
             &es->bl_list, struct backlash_params, node);
     if (last->target == target)
         return;                         // nothing changed, keep the list short
+    // YUMI: backlash_lookup suppose que les fenetres de rampe ne se
+    // RECOUVRENT JAMAIS : la transition vers un jalon doit avoir atterri
+    // (a son print_time) avant que la rampe du suivant ne demarre (a
+    // print_time - ramp). Sinon, au print_time du jalon du milieu, la paire
+    // active bascule et l'offset SAUTE de (cible_suivante - cible_milieu) *
+    // f(1 - dt/ramp) : discontinuite de la position commandee, itersolve
+    // place plusieurs pas au meme instant, stepcompress refuse
+    // ("Invalid sequence", machine arretee). C'est le crash du changement de
+    // couche : retract, reprise et paliers de bleed tombent volontiers a
+    // moins d'une rampe les uns des autres. On impose donc l'invariant ICI,
+    // a l'insertion -- la continuite d'abord :
+    double start = print_time - ramp;
+    while (!list_is_first(&last->node, &es->bl_list)
+           && start < last->print_time) {
+        if (last->print_time - last->ramp < sk->last_flush_time) {
+            // Trop tard pour supprimer `last` : la generation de pas est DEJA
+            // entree dans sa fenetre, retirer le jalon changerait la position
+            // commandee a des instants deja emis. On raccourcit alors la
+            // NOUVELLE rampe pour qu'elle demarre pile a l'atterrissage de
+            // `last` : a cet instant f(0)=0 et la base vaut last->target,
+            // la continuite est assuree des deux cotes. La pointe de vitesse
+            // monte (1,5*delta/ramp) -- un a-coup possible, jamais un saut :
+            // la continuite prime sur le confort moteur.
+            ramp = print_time - last->print_time;
+            break;
+        }
+        // `last` est entierement dans le futur (sa fenetre n'a pas encore ete
+        // generee) : sa cible ne sera de toute facon jamais atteinte, la
+        // nouvelle rampe la supplante. Fusionner plutot qu'empiler deux
+        // rampes qui se chevauchent.
+        struct backlash_params *prev = list_prev_entry(last, node);
+        list_del(&last->node);
+        free(last);
+        last = prev;
+    }
     // Drop entries the flush has moved past, so the list cannot grow unbounded.
     double cleanup = sk->last_flush_time - es->backlash_ramp;
     struct backlash_params *first = list_first_entry(
