@@ -137,7 +137,12 @@ class HandleConstants:
         name, value = req.split()[1:]
         self.set_value(name, int(value, 0))
     def decl_constant_str(self, req):
-        name, value = req.split(None, 2)[1:]
+        # YUMI: une constante chaine vide (ex. CONFIG_YUMI_CONFIG="") produit
+        # une ligne sans 3e champ — la valeur est alors la chaine vide, ne
+        # pas planter le build dessus.
+        parts = req.split(None, 2)
+        name = parts[1]
+        value = parts[2] if len(parts) > 2 else ''
         value = value.strip()
         if value.startswith('"') and value.endswith('"'):
             value = value[1:-1]
