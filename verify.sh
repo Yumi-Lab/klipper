@@ -10,6 +10,16 @@ python3 -m py_compile klippy/kinematics/extruder.py klippy/extras/motion_queuing
 echo "== gcc -fsyntax-only (kin_extruder.c) =="
 gcc -fsyntax-only -I klippy/chelper klippy/chelper/kin_extruder.c
 
+# Banc de continuite du rattrapage de jeu (Lot 3) : rejoue le vrai
+# kin_extruder.c sur la sequence dense d'un changement de couche et exige
+# un offset SANS saut (seuil relatif au bras de reference du meme run, cf.
+# l'en-tete du banc). Compile en natif : pas de .dict ni docker requis.
+echo "== banc continuite backlash (scripts/backlash_overlap_bench.c) =="
+mkdir -p .loop/tmp
+cc -O2 -w -I klippy/chelper -o .loop/tmp/bl_overlap_bench \
+    scripts/backlash_overlap_bench.c -lm
+.loop/tmp/bl_overlap_bench
+
 # Harnais Klipper (simulateur) : necessite un .dict MCU compile (Lot 1 de
 # PROGRESS.md). Tant qu'il n'existe pas, on ne bloque PAS les autres lots
 # dessus -- on le saute avec un message clair plutot que d'echouer a chaque
