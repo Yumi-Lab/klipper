@@ -696,3 +696,12 @@
   croie être sur le mauvais commit au moment du `git pull`. Aucune case
   actionnable, pas de `.done` (interdit en mode dégradé sans PASS réel).
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 (itération suivante) — codeuse : attente gates humains, inchangé.**
+  Verdict synthétique périmé ignoré (mode dégradé, seul bloqueur « review not
+  delivered »), inject vide, `.gate-handoff` toujours présent → protocole live
+  non exécuté. Aucune case actionnable (Lot 6 et Lot 8 = gates humains), pas
+  de `.done`. Le projet est complet sauf les gates humains ; la reprise
+  attendue reste : suppression de `.gate-handoff` + verdict humain → GATE PASS
+  (human) Lots 6+8, puis revue réelle (dette : `3c97057..HEAD`), puis `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
