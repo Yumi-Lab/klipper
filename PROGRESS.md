@@ -1027,3 +1027,12 @@
   ≈ 67 Ko, sous le seuil d'archivage. Aucune case actionnable (Lot 6 / Lot 8 =
   gates humains), pas de `.done` (gates non confirmés + pas de verdict PASS réel).
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 07:10Z — codeuse : attente gates humains, inchangé.**
+  Verdict = CHANGES_REQUESTED synthétique périmé (seul bloqueur « review not
+  delivered ») → ignoré en mode dégradé ; inject vide ; `.gate-handoff` présent
+  (13:40, protocole live Lots 6+8) non exécuté par l'humain ; arbre propre (seul
+  `.loop2.out` non suivi, artefact hors périmètre) ; PROGRESS.md ≈ 69 Ko, sous
+  le seuil d'archivage. Aucune case actionnable (Lot 6 / Lot 8 = gates humains),
+  pas de `.done` (gates non confirmés + pas de verdict PASS réel).
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
