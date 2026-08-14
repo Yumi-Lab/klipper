@@ -805,3 +805,11 @@
   inchangée : suppression de `.gate-handoff` + verdict humain → GATE PASS
   (human) Lots 6+8, revue réelle `3c97057..HEAD`, puis `.done`.
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 06:06Z — codeuse : attente gates humains, inchangé.**
+  Verdict synthétique périmé ignoré (mode dégradé), inject vide, `.gate-handoff`
+  présent (13:40Z) → protocole live non exécuté. Arbre propre. Aucune case
+  actionnable (Lots 6/8 = gates humains), pas de `.done`. Reprise attendue :
+  suppression `.gate-handoff` + verdict humain → GATE PASS (human) Lots 6+8,
+  revue réelle `3c97057..HEAD`, puis `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
