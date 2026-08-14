@@ -705,3 +705,16 @@
   attendue reste : suppression de `.gate-handoff` + verdict humain → GATE PASS
   (human) Lots 6+8, puis revue réelle (dette : `3c97057..HEAD`), puis `.done`.
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 (itération suivante) — codeuse : attente gates humains, inchangé.**
+  Relevé d'état : verdict `.loop/control/last-verdict.json` = CHANGES_REQUESTED
+  synthétique périmé (stale, seul bloqueur « review not delivered ») → ignoré
+  en mode dégradé ; `.loop/inject.md` vide ; `.gate-handoff` présent
+  (daté 13:40Z, protocole Lots 6+8, déploiement `e7241df` dans l'historique) →
+  l'humain n'a pas encore rejoué le protocole live. Aucune case cochable ne
+  reste : Lot 6 et Lot 8 sont des gates humains, décochés par construction.
+  Pas de `.done` (doublement interdit : gates non confirmés + pas de verdict
+  PASS réel). Projet complet sauf gates humains ; reprise attendue inchangée :
+  suppression de `.gate-handoff` + verdict humain → GATE PASS (human) Lots 6+8,
+  puis revue réelle de la plage `3c97057..HEAD` (dette assumée), puis `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
