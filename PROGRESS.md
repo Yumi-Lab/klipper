@@ -892,3 +892,17 @@
   verdict humain → GATE PASS (human) Lots 6+8, revue réelle `3c97057..HEAD`,
   puis `.done`.
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 06:36Z — codeuse : attente gates humains, inchangé.**
+  Relevé identique : verdict synthétique périmé ignoré (mode dégradé) ;
+  inject vide ; `.gate-handoff` présent (13:40 +0800) → protocole live non
+  exécuté. Précision mécanique sur l'attente : tant que `.gate-handoff`
+  existe, loop.sh (l. 720) compte chaque itération comme « progrès » →
+  max_stale ne se déclenchera PAS ; la boucle continue jusqu'à (a) retour
+  humain (suppression `.gate-handoff` + verdict dans inject.md → GATE PASS
+  (human) Lots 6+8), (b) retour d'une revue réelle PASS sur
+  `3c97057..HEAD` (alors gate suspendu → arrêt propre « gate en attente
+  humain », watchdog muet), ou (c) max_iters=60. C'est le comportement
+  prévu du gate SUSPENDU en mode dégradé, pas un blocage agent. Arbre
+  propre, PROGRESS.md ≈ 58 Ko. Pas de `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
