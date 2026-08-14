@@ -685,3 +685,14 @@
   suppression de `.gate-handoff` + verdict humain → cocher Lot 6 / Lot 8
   (GATE PASS (human)), puis verdict de revue réel, puis `.done`.
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 (itération suivante) — codeuse : toujours en attente des gates humains.**
+  Même état que l'entrée 05:31Z : verdict synthétique périmé ignoré (mode
+  dégradé), inject vide, `.gate-handoff` toujours présent → l'humain n'a pas
+  encore joué le protocole. Seule action utile cette itération : la note de
+  déploiement du handoff attendait « e7241df en tête », or HEAD porte
+  désormais des commits `chore:` au-dessus du fix — note corrigée
+  (« e7241df présent dans les derniers commits ») pour éviter que l'humain
+  croie être sur le mauvais commit au moment du `git pull`. Aucune case
+  actionnable, pas de `.done` (interdit en mode dégradé sans PASS réel).
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
