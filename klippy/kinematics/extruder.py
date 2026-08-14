@@ -109,6 +109,12 @@ class ExtruderStepper:
         # the planner only stamps real changes.
         self._backlash_target = 0.
         self._backlash_flips = 0
+        # Miroir des parametres DEJA ecrits cote C (dernier extruder_set_backlash
+        # effectif) : la fenetre de scan active en C est max(hst, _c_ramp) tant
+        # que _c_play > 0. Indispensable pour savoir, AVANT de poser un jalon,
+        # si sa rampe tient dans la fenetre que la generation va appliquer.
+        self._c_play = 0.
+        self._c_ramp = 0.
         # Derniere rampe non nulle : sert a ramener l'offset a zero quand le jeu
         # tombe a zero, au lieu de couper net.
         self._last_ramp = .02
@@ -258,6 +264,7 @@ class ExtruderStepper:
             raise self.printer.config_error(msg)
         toolhead = self.printer.lookup_object("toolhead")
         ffi_main, ffi_lib = chelper.get_ffi()
+        motion_queuing = self.printer.lookup_object('motion_queuing')
         # RAMENER LE DECALAGE A ZERO AVANT DE TOUCHER AUX PARAMETRES.
         # Six arrets machine sont partis d'ici : eteindre la couche, changer de
         # file, changer la rampe... a chaque fois un parametre bougeait pendant
@@ -266,11 +273,36 @@ class ExtruderStepper:
         # le principe : la couche revient a zero PAR SA RAMPE, on attend que les
         # pas soient emis, et seulement ensuite on change ce qu'on veut.
         if self._backlash_target:
+            # MAIS la rampe de retour doit tenir dans la fenetre de scan ACTIVE
+            # en C au moment ou elle est generee. La poser avec la NOUVELLE
+            # rampe alors que la fenetre est encore l'ANCIENNE (plus etroite,
+            # ex. COEF 1.0->1.5 : 88,4 ms contre 58,9 ms) laisse un TROU : au
+            # dela de gen_steps_post_active apres le dernier move extrudant,
+            # itersolve ne genere plus de pas pour ce stepper -- la queue de la
+            # rampe, si elle court sur des moves SANS extrusion (travel, Z-hop),
+            # n'est jamais emise. sk->commanded_pos reste alors decale du jeu
+            # entier ; a la reprise, calc_position saute de cette valeur d'un
+            # coup et stepcompress refuse la sequence ("Invalid sequence",
+            # arret machine quelques secondes APRES la commande, crash live du
+            # 2026-08-14 pendant une impression active). Si la nouvelle rampe
+            # depasse la fenetre courante, on ELARGIT D'ABORD la fenetre (et on
+            # resynchronise kin_flush_delay AVANT le moindre flush, cf. la
+            # regle YUMI_PATCHES) ; poser les parametres deux fois est
+            # idempotent. Jeu nul : la rampe de retour vaut _last_ramp, qui EST
+            # la fenetre courante -- le cas ne se presente pas.
+            hst = self.pressure_advance_smooth_time * .5
+            c_win = hst
+            if self._c_play > 0. and self._c_ramp > c_win:
+                c_win = self._c_ramp
+            if ramp > c_win:
+                ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
+                self._c_play, self._c_ramp = play, ramp
+                motion_queuing.check_step_generation_scan_windows()
             ffi_lib.extruder_backlash_flip(self.sk_extruder,
                                            toolhead.get_last_move_time(),
-                                           0., self._backlash_ramp())
+                                           0., ramp)
             self._backlash_target = 0.
-            toolhead.dwell(self._backlash_ramp())
+            toolhead.dwell(ramp)
         toolhead.flush_step_generation()
         # Repartir d'un historique vierge : plus aucun jalon ne peut etre relu
         # avec les nouveaux reglages.
@@ -279,6 +311,7 @@ class ExtruderStepper:
         self._restart_base = 0.
         self._bleed_left = 0.
         ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
+        self._c_play, self._c_ramp = play, ramp
         if ramp > 0.:
             self._last_ramp = ramp
         # extruder_set_backlash vient de reecrire gen_steps_pre/post_active sur
@@ -291,13 +324,10 @@ class ExtruderStepper:
         # couche deja active (BACKLASH_SPEED 80->50 en direct : "Internal error
         # in stepcompress", 2026-08-13). Meme remede que la PA : re-synchroniser
         # kin_flush_delay avec la fenetre qu'on vient d'ecrire.
-        motion_queuing = self.printer.lookup_object('motion_queuing')
         motion_queuing.check_step_generation_scan_windows()
         # Le prochain mouvement re-jalonne la cible avec le NOUVEAU jeu : c'est
         # ce jalon qui fait redescendre (ou remonter) l'offset en douceur.
         self._backlash_target = None
-        motion_queuing = self.printer.lookup_object('motion_queuing')
-        motion_queuing.check_step_generation_scan_windows()
     def _cur_lead(self):
         mq = self.printer.lookup_object('motion_queuing')
         return mq.get_trapq_lead(self.stepper.get_trapq())

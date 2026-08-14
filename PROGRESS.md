@@ -57,6 +57,30 @@
       stepcompress" / "Invalid sequence" sur plusieurs changements de couche).
       **STOP la boucle après avoir écrit ce fichier — ne pas cocher ce lot
       soi-même.** Sera coché seulement après confirmation humaine du test réel.
+      **RETOUR 2026-08-14 : FAIL** (voir `.loop/inject-archive.md`) — le crash
+      est revenu sur un cas NON couvert : changement de `BACKLASH_COEF` en
+      direct **pendant une impression active** (le fix `e98c567` n'avait été
+      validé live qu'à console idle). Cause racine trouvée et fixée au Lot 7 ;
+      un NOUVEAU gate live est requis (Lot 8).
+
+- [x] **Lot 7 — reconfiguration live PENDANT une impression active.**
+      ✅ FAIT (voir Journal 2026-08-14) : cause racine identifiée par repro
+      harnais (rampe de retour posée avec la NOUVELLE rampe alors que la
+      fenêtre de scan C est encore l'ANCIENNE, plus étroite → trou de
+      génération sur les moves sans extrusion → saut de position →
+      « Invalid sequence » quelques secondes après la commande). Fix :
+      élargir la fenêtre AVANT de poser le jalon de retour quand la nouvelle
+      rampe la dépasse (miroir `_c_play`/`_c_ramp`), resync avant tout flush.
+      Rouge sans le fix (signature exacte de production), vert avec, 4/4
+      harnais + banc verts, `YUMI_PATCHES.md` 6ᵉ cause ajoutée.
+
+- [ ] **Lot 8 — GATE HUMAIN n°2 (matériel réel).** Rejouer sur le pad le cas
+      qui a fait FAIL au Lot 6, avec le fix Lot 7 déployé : impression active
+      + `SET_PRESSURE_ADVANCE BACKLASH_COEF=1.5` en direct, puis poursuivre
+      l'impression. PASS = aucun « Internal error in stepcompress » /
+      « Invalid sequence » après la commande ET jusqu'à la fin du print.
+      **STOP la boucle après avoir écrit `.gate-handoff` — ne pas cocher ce
+      lot soi-même.**
 
 ## Journal
 (la codeuse et la contrôleuse ajoutent une ligne horodatée par itération significative)
@@ -429,3 +453,81 @@
   DÉCOCHÉ, pas de `.done` — tout le reste de la DoD (1-4) est fait et vérifié
   (`./verify.sh` vert à `5f7d508` : 3/3 klippy dont la repro rouge-sans-fix,
   banc 5 cas sous seuil). STOP en attente de l'humain.
+
+- **2026-08-14 03:37Z — codeuse, Lot 7 FAIT (cause racine + fix + repro).**
+  Retour du gate humain : FAIL (inject archivé dans `.loop/inject-archive.md`) —
+  le crash est revenu sur reconfiguration live `BACKLASH_COEF 1.0->1.5` PENDANT
+  une impression active (pad @ `3c97057`, les deux fixes précédents déployés et
+  vérifiés par md5 — pas un défaut de déploiement).
+  CAUSE RACINE (confirmée par repro, pas par supposition) : `_apply_backlash`
+  posait le jalon de retour à zéro avec la NOUVELLE rampe (88,4 ms) alors que
+  la fenêtre de scan C (`gen_steps_pre/post_active`) était encore l'ANCIENNE
+  (58,9 ms). Au-delà de `gen_steps_post_active` après le dernier move extrudant,
+  `itersolve_generate_steps` ne génère plus de pas pour l'extrudeur : la queue
+  de la rampe de retour, courant sur un long travel SANS extrusion, n'était
+  jamais émise. `sk->commanded_pos` restait décalé du jeu entier ; au move
+  extrudant suivant, `calc_position` sautait de ~1,57 mm d'un coup ->
+  stepcompress refuse (« Invalid sequence »), quelques secondes APRES la
+  commande — exactement le délai observé en live. Le cas idle validé la veille
+  ne pouvait pas le voir : sans offset en cours, la branche de retour ne
+  s'exécute pas du tout.
+  FIX (`klippy/kinematics/extruder.py::_apply_backlash`) : miroir `_c_play`/
+  `_c_ramp` des paramètres déjà écrits en C ; si la nouvelle rampe dépasse la
+  fenêtre active, `extruder_set_backlash` + `check_step_generation_scan_windows`
+  sont appelés AVANT de poser le jalon de retour (élargir la fenêtre avant le
+  flush qui génère la rampe, jamais après — même règle YUMI_PATCHES que
+  `e98c567`, déplacée plus tôt dans la séquence). Le double appel
+  `extruder_set_backlash` est idempotent ; le cas jeu->0 n'est pas concerné
+  (rampe de retour = `_last_ramp` = fenêtre courante). Au passage : suppression
+  de la resync dupliquée en fin de fonction (reliquat de `e98c567`).
+  Aucun changement C : `kin_extruder.c` inchangé.
+
+  PROOF 1 — repro ROUGE sans le fix (HEAD `3c97057`, harnais klippy réel) :
+  cmd exacte :
+  `docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src python@sha256:dd4fe98ab39f91e936f8e7e7a65a3ce59ecfb11e32f9a125b3132779920ba7f7 bash -c "pip install -q greenlet==3.5.5 cffi==2.1.1 pyserial==3.5 jinja2==3.1.6 && python scripts/test_klippy.py -d dict test/klippy/backlash_live_reconfig.test"`
+  sortie réelle (lignes filtrées) :
+  ```
+      Starting test/klippy/backlash_live_reconfig.test (backlash_layer_change.cfg)
+  b'stepcompress o=9 i=0 c=3 a=0: Invalid sequence'
+  b"Error in syncemitter 'extruder' step generation"
+      Test case test/klippy/backlash_live_reconfig.test FAILED (Error during test)!
+  ```
+  critère numérique : test FAILED, signature IDENTIQUE à la production
+  (« Invalid sequence » + « Error in syncemitter extruder » — o=9/c=3 en sim
+  vs o=5/c=14 sur le pad, même mécanisme, les ids diffèrent par config).
+  Le scénario : config EXACTE du crash live, retrait (offset -> -play), long
+  travel de 900 ms sans extrusion, reprise en file, puis
+  `SET_PRESSURE_ADVANCE BACKLASH_COEF=1.5` SANS M400 (moves en vol, comme la
+  console live), puis cycles retract/travel/reprise sous le nouveau jeu.
+
+  PROOF 2 — VERT avec le fix + aucune régression (`./verify.sh` complet) :
+  cmd exacte : `./verify.sh`
+  sortie réelle (dernières lignes) :
+  ```
+  seuil (meme run) = 1.00 pas  (4x controle B=0.16, plancher 1)
+  CONTINUITE OK : tous les cas sous le seuil.
+      Starting test/klippy/pressure_advance.test (pressure_advance.cfg)
+      Starting test/klippy/extruders.test (extruders.cfg)
+      Starting test/klippy/backlash_layer_change.test (backlash_layer_change.cfg)
+      Starting test/klippy/backlash_live_reconfig.test (backlash_layer_change.cfg)
+      All 4 test cases passed
+  OK
+  ```
+  critère numérique : rc=0 ; py_compile + gcc -fsyntax-only (6 warnings
+  `externally_visible` préexistants, Apple clang) + banc 5 cas sous seuil 1,00
+  du même run + 4/4 tests klippy dans l'image épinglée, dont la repro du Lot 7
+  et la repro du Lot 4 (toujours verte — pas de régression sur l'invariant de
+  non-recouvrement) et la fin jeu->0 du nouveau scénario (ordre préservé).
+  attribution : repo HEAD `3c97057` + fichiers du lot (extruder.py, verify.sh,
+  test/klippy/backlash_live_reconfig.test, YUMI_PATCHES.md) ; hôte macOS 15.2
+  arm64 (Darwin 24.2.0), Apple clang 16.0.0, -O2 pour le banc ; harnais dans
+  l'image python épinglée par digest + pips épinglés ; date 2026-08-14T03:37Z.
+  VARIED: `_apply_backlash` (ordre fenêtre/jalon) / HELD FIXED: C
+  (kin_extruder.c, itersolve.c), dict, scénarios des lots précédents, hôte.
+  WHAT THIS DOES NOT SAY: le harnais prouve le mécanisme et le fix en
+  SIMULATEUR (MCU simulé, temps réacteur) — la validation sur la machine
+  physique reste le gate humain du Lot 8. Le banc de continuité ne couvre pas
+  ce mécanisme (il rejoue backlash_lookup/flip, pas la fenêtre itersolve) ;
+  c'est le harnais klippy qui le couvre.
+  Prochaine étape : Lot 8 — nouveau `.gate-handoff` (rejouer le cas FAIL du
+  Lot 6 avec ce fix déployé) et STOP.

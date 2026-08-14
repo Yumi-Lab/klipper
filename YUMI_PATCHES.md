@@ -99,7 +99,7 @@ cale à l'impression, c'est sa raison d'être.
 
 ### Les arrêts machine rencontrés (et ce qui les a fixés)
 
-Cinq classes de crash « Internal error in stepcompress » / « Invalid sequence »
+Six classes de crash « Internal error in stepcompress » / « Invalid sequence »
 rencontrées sur la couche de rattrapage, dans l'ordre. La règle d'or transversale :
 la position commandée doit rester **continue**, et toute fenêtre élargie exige une
 resync — deux propriétés à **imposer**, jamais à supposer.
@@ -136,6 +136,23 @@ resync — deux propriétés à **imposer**, jamais à supposer.
    de référence du même run) et `test/klippy/backlash_layer_change.test`
    (scénario dense de changement de couche — rouge sans le fix avec la signature
    exacte de production, vert avec).
+6. **Rampe de retour plus longue que la fenêtre active** (crash live du
+   2026-08-14, repro `test/klippy/backlash_live_reconfig.test`) — `_apply_backlash`
+   posait le jalon de retour à zéro avec la **nouvelle** rampe (ex. COEF 1.0→1.5 :
+   88,4 ms) alors que la fenêtre de scan C était encore l'**ancienne** (58,9 ms).
+   Au-delà de `gen_steps_post_active` après le dernier move extrudant, itersolve
+   ne génère plus de pas pour ce stepper : la queue de la rampe, courant sur des
+   moves **sans extrusion** (travel, Z-hop), n'était jamais émise. `commanded_pos`
+   restait décalé du jeu entier ; à la reprise, `calc_position` sautait de cette
+   valeur d'un coup → « Invalid sequence » quelques secondes APRÈS la commande,
+   en pleine impression. Fix : si la nouvelle rampe dépasse la fenêtre courante
+   (miroir `_c_play`/`_c_ramp`), `extruder_set_backlash` + resync sont appelés
+   **AVANT** de poser le jalon de retour — la fenêtre est élargie avant le flush
+   qui génère la rampe, jamais après. Poser les paramètres deux fois est
+   idempotent ; le cas jeu→0 n'est pas concerné (la rampe de retour y vaut
+   `_last_ramp`, qui EST la fenêtre courante). Rouge sans le fix avec la
+   signature exacte de production (`syncemitter 'extruder'` + « Invalid
+   sequence »), vert avec.
 
 ### Ce que fait lead_time
 - `lead_time` (config `[extruder]` ou `SET_PRESSURE_ADVANCE EXTRUDER=... LEAD_TIME=`)

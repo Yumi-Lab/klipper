@@ -1,0 +1,42 @@
+# YUMI: bowden backlash take-up -- LIVE reconfigure mid-print, the "Invalid
+# sequence" crash of 2026-08-14 (gate FAIL Lot 6): SET_PRESSURE_ADVANCE
+# BACKLASH_COEF 1.0 -> 1.5 (play 1.571 -> 2.356 mm, ramp 58.9 -> 88.4 ms)
+# issued while a print is IN FLIGHT -- moves already processed in the trapq,
+# offset at -play, and a long travel queued behind.
+# No M400 before the SET: batch mode defers process_move to lookahead flushes,
+# so the reconfigure lands exactly like the live console command did.
+DICTIONARY atmega2560.dict
+CONFIG backlash_layer_change.cfg
+
+G28
+G1 X20 Y20 Z1 F6000
+M83
+# Exact config of the live crash (first line applied long before the print)
+SET_PRESSURE_ADVANCE ADVANCE=0 SMOOTH_TIME=0 LEAD_TIME=0 BOWDEN_LENGTH=800 BACKLASH_COEF=1 BACKLASH_SPEED=40 BACKLASH_ACCEL=15000 BACKLASH_DEDUCT=0.5 BACKLASH_BLEED=10
+# Settle into forward extrusion, then a retraction: offset now at -play
+G1 X30 E2 F3000
+G1 E-1 F6000
+# Long travel with NO extrusion: the extruder stepper is inactive far longer
+# than the 58.9 ms scan window. The return-to-zero ramp stamped by the
+# reconfigure (88.4 ms, LONGER than the active window) ends in this dead
+# zone -- on the buggy order its tail is never generated.
+G1 X180 F12000
+# Queued behind the travel, still unexecuted when the SET lands:
+G1 E1.05 F6000
+G1 X100 E2 F3000
+# LIVE reconfigure, mid-print, play and ramp GROW -- the failing live case.
+SET_PRESSURE_ADVANCE BACKLASH_COEF=1.5
+# The print continues: retract / travel / resume cycles under the new play.
+G1 E-1 F6000
+G1 X110 F12000
+G1 E1.05 F6000
+G1 X120 E2 F3000
+G1 E-1 F6000
+G1 X130 F12000
+G1 E1.05 F6000
+G1 X140 E2 F3000
+M400
+# And back down to zero with an offset possibly pending (regression guard
+# for the play -> 0 path, whose ordering the fix must NOT break).
+SET_PRESSURE_ADVANCE BACKLASH_COEF=0
+G1 X150 E2 F3000

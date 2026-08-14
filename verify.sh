@@ -51,7 +51,8 @@ else
                  jinja2==3.1.6 && \
                  python scripts/test_klippy.py -d '$DICTDIR' \
                      test/klippy/pressure_advance.test test/klippy/extruders.test \
-                     test/klippy/backlash_layer_change.test"
+                     test/klippy/backlash_layer_change.test \
+                     test/klippy/backlash_live_reconfig.test"
 fi
 
 echo "OK"
