@@ -1,0 +1,60 @@
+# YUMI: travel creep transform (gcode_move.set_move_transform, chained like
+# bed_mesh/skew_correction) coexisting with the bowden take-up in a real
+# print pipeline. Mix: short travels (below TRAVEL_CREEP_MIN_DIST, must stay
+# a no-op), long travels (creep injected + repaid), and normal
+# retract/travel/resume cycles (the take-up's own territory, untouched by
+# this layer) -- proves the two mechanisms act on disjoint move sets without
+# fighting, per scripts/travel_creep_bench.py's math-level proof.
+# NOTE: this config's bed is 200x200 (position_max) -- travels fold back and
+# forth to stay in bounds instead of monotonically increasing.
+DICTIONARY atmega2560.dict
+CONFIG backlash_layer_change.cfg
+
+G28
+G1 X20 Y20 Z1 F6000
+M83
+# Take-up active (real crash config from YUMI_PATCHES cause #5/#6) AND creep
+# active together: TRAVEL_CREEP_MIN_DIST=10, RATE=0.002 mm/mm, MAX=1mm.
+SET_PRESSURE_ADVANCE ADVANCE=0 SMOOTH_TIME=0 LEAD_TIME=0 BOWDEN_LENGTH=800 BACKLASH_COEF=1 BACKLASH_SPEED=40 BACKLASH_ACCEL=15000 BACKLASH_DEDUCT=0.5 BACKLASH_BLEED=10 TRAVEL_CREEP_RATE=0.002 TRAVEL_CREEP_MAX=1.0 TRAVEL_CREEP_MIN_DIST=10
+
+# Settle into forward extrusion
+G1 X30 E2 F3000
+
+# Short travel (5mm, below min_dist): must be a pure no-op for creep.
+G1 X35 F12000
+G1 X45 E2 F3000
+
+# Long travel (60mm): creep injects, then a real extrude on the next
+# feature must repay it in full before the take-up's own retract/resume
+# logic (already exercised by backlash_layer_change.test) gets a turn.
+G1 X105 F12000
+G1 X115 E2 F3000
+
+# A real retract straight after a long travel with pending creep -- the
+# less common ordering (retract settles the debt too, per the bench's
+# "any real E movement" rule), then the take-up's normal cycle.
+G1 X175 F12000
+G1 E-1 F6000
+G1 X176 F12000
+G1 E1.05 F6000
+G1 X186 E2 F3000
+
+# Several more long travels back to back (folded within the 200mm bed), no
+# extrusion between them: creep must accumulate and cap, never exceed
+# TRAVEL_CREEP_MAX.
+G1 X126 F12000
+G1 X186 F12000
+G1 X126 F12000
+G1 X186 E2 F3000
+
+# Live re-tune of creep params mid-print (independent of the take-up's own
+# live-reconfig path, no _apply_backlash() call involved) -- must not crash.
+SET_PRESSURE_ADVANCE TRAVEL_CREEP_RATE=0.005 TRAVEL_CREEP_MAX=0.4
+G1 X126 F12000
+G1 X136 E2 F3000
+# Feature off mid-print, with a fresh debt outstanding at the moment it is
+# turned off -- must still be repaid cleanly, not orphaned or double-paid.
+G1 X196 F12000
+SET_PRESSURE_ADVANCE TRAVEL_CREEP_RATE=0
+G1 X30 E2 F3000
+M400

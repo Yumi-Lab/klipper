@@ -98,6 +98,28 @@ class ExtruderStepper:
         # halves it. Tuned live like flow, without ever touching the geometry.
         self.backlash_coef = config.getfloat('backlash_coef', 1., minval=0.,
                                              maxval=BACKLASH_COEF_MAX)
+        # YUMI: TRAVEL CREEP -- distinct from the backlash take-up above. The
+        # take-up walks the bowden's dead travel ONCE at the reversal, then
+        # HOLDS. Video evidence (Nicolas, 2026-08-14) : the nozzle stays clean
+        # on short travels, but past ~1cm of empty move a drop keeps forming
+        # PROGRESSIVELY during the travel itself -- residual melt-zone
+        # pressure that keeps relaxing beyond what the one-shot take-up
+        # covers. This layer keeps retracting a little for as long as a real
+        # travel (no extrusion) continues, and repays it in FULL on the next
+        # real extruding move -- disjoint from the take-up's own moves (which
+        # always carry E), so the two never fight over the same move.
+        # 0 = off (default) : the stock path is untouched.
+        self.travel_creep_rate = config.getfloat('travel_creep_rate', 0.,
+                                                  minval=0.)
+        self.travel_creep_max = config.getfloat('travel_creep_max', 1.,
+                                                 above=0.)
+        self.travel_creep_min_dist = config.getfloat(
+            'travel_creep_min_dist', 10., above=0.)
+        # Mm actuellement injectes en trop, a rendre au prochain vrai mouvement
+        # d'extrusion. Jamais persiste au-dela d'une session : au pire on perd
+        # quelques diximes de mm de matiere a une pause/fin de print, jamais
+        # une sur-extrusion.
+        self._creep_owed = 0.
         # Setup stepper
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -168,6 +190,10 @@ class ExtruderStepper:
                 # ressemblent dans l'API et seul le second compte.
                 'backlash_target': self._backlash_target,
                 'backlash_flips': self._backlash_flips,
+                'travel_creep_rate': self.travel_creep_rate,
+                'travel_creep_max': self.travel_creep_max,
+                'travel_creep_min_dist': self.travel_creep_min_dist,
+                'travel_creep_owed': self._creep_owed,
                 'motion_queue': self.motion_queue}
     def note_extrude_dir(self, print_time, direction, dist=0.):
         # YUMI: called by the planner for every move, which is the ONLY place
@@ -482,6 +508,20 @@ class ExtruderStepper:
         b_bld = gcmd.get_float('BACKLASH_BLEED', self.backlash_bleed, above=0.)
         b_res = gcmd.get_float('BACKLASH_RESTART', self.backlash_restart,
                                minval=0.)
+        # YUMI: travel creep -- independent of the take-up above (different
+        # moves, different C-side mechanism entirely: this never touches
+        # gen_steps_pre/post_active, it only edits E targets at the gcode_move
+        # transform, cf. PrinterExtruder.move). No _apply_backlash() call
+        # needed for these three -- just store them, the transform reads them
+        # live on the next travel move.
+        t_rate = gcmd.get_float('TRAVEL_CREEP_RATE', self.travel_creep_rate,
+                                minval=0.)
+        t_max = gcmd.get_float('TRAVEL_CREEP_MAX', self.travel_creep_max,
+                               above=0.)
+        t_min = gcmd.get_float('TRAVEL_CREEP_MIN_DIST',
+                               self.travel_creep_min_dist, above=0.)
+        self.travel_creep_rate, self.travel_creep_max = t_rate, t_max
+        self.travel_creep_min_dist = t_min
         cur = (self.bowden_length, self.backlash_coef, self.backlash_speed,
                self.bowden_id, self.bowden_turns, self.backlash_accel,
                self.backlash_deduct, self.backlash_bleed,
@@ -523,13 +563,18 @@ class ExtruderStepper:
                "BACKLASH_DEDUCT: %.3f mm (configurable)\n"
                "BACKLASH_BLEED: %.1f mm (configurable)\n"
                "BACKLASH_RESTART: %.3f mm (configurable)\n"
+               "TRAVEL_CREEP_RATE: %.4f mm/mm (configurable)\n"
+               "TRAVEL_CREEP_MAX: %.3f mm (configurable)\n"
+               "TRAVEL_CREEP_MIN_DIST: %.1f mm (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
                   self.bowden_id, self.bowden_turns, self.backlash_coef,
                   self.backlash_speed, self.backlash_accel,
                   self.backlash_deduct, self.backlash_bleed,
-                  self.backlash_restart, self._backlash_play(), self._backlash_ramp() * 1000.))
+                  self.backlash_restart, self.travel_creep_rate,
+                  self.travel_creep_max, self.travel_creep_min_dist,
+                  self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
     cmd_SET_E_ROTATION_DISTANCE_help = "Set extruder rotation distance"
@@ -627,6 +672,16 @@ class PrinterExtruder:
             toolhead.set_extruder(self, 0.)
             gcode.register_command("M104", self.cmd_M104)
             gcode.register_command("M109", self.cmd_M109)
+            # YUMI: travel creep transform. Registered on klippy:connect, once
+            # every [extras] section (bed_mesh, skew_correction...) has had
+            # its own __init__ run and called set_move_transform -- force=True
+            # then hands US whatever was already chained, so we WRAP it
+            # (outermost) instead of racing config load order. Only ONE
+            # PrinterExtruder does this (the primary 'extruder'): E is a
+            # single shared gcode axis regardless of which physical stepper
+            # is synced to it.
+            self.printer.register_event_handler(
+                "klippy:connect", self._register_travel_creep)
         gcode.register_mux_command("ACTIVATE_EXTRUDER", "EXTRUDER",
                                    self.name, self.cmd_ACTIVATE_EXTRUDER,
                                    desc=self.cmd_ACTIVATE_EXTRUDER_help)
@@ -644,6 +699,76 @@ class PrinterExtruder:
         return self.trapq
     def get_axis_gcode_id(self):
         return 'E'
+    def _register_travel_creep(self):
+        gcode_move = self.printer.lookup_object('gcode_move')
+        self._creep_old_transform = gcode_move.set_move_transform(
+            self, force=True)
+    def get_position(self):
+        # YUMI: must return the position in GCODE's OWN frame -- the one
+        # bug the bench (scripts/travel_creep_bench.py, case C) caught: gcode_move
+        # tracks last_position purely from parsed G-code text, incrementally,
+        # and NEVER re-reads it from us between two moves (only on a reset).
+        # If we reported the RAW downstream E (creep included), a second
+        # consecutive travel would see a fake "de" against our injection and
+        # be misread as a real extrusion resuming -> spurious repayment. Same
+        # principle as bed_mesh's own get_position() undoing its Z adjustment:
+        # report as if THIS layer had not touched anything.
+        pos = self._creep_old_transform.get_position()
+        steppers = self._backlash_steppers()
+        if steppers and steppers[0]._creep_owed:
+            pos[3] += steppers[0]._creep_owed
+        return pos
+    def move(self, newpos, speed):
+        # YUMI: TRAVEL CREEP. Every move funnels through here before the rest
+        # of the transform chain (bed_mesh, etc. below us) and the toolhead.
+        # See travel_creep_rate/_max/_min_dist in ExtruderStepper.__init__ for
+        # the "why". Mechanism, in one pass, no lookahead of our own needed:
+        #   - E unchanged, XY travel >= min_dist  -> inject a bit MORE
+        #     retraction into THIS move (capped so total owed <= max).
+        #   - E growing (real extrusion resuming) and something is owed
+        #     -> repay it ALL on this move, so the net material stays exact.
+        #   - anything else (a real retract/reprise move, the take-up's own
+        #     territory; a short travel under min_dist) -> untouched.
+        # These are DISJOINT sets of moves (E==0 here vs E!=0 in
+        # note_extrude_dir/process_move), so this never fights the take-up.
+        steppers = self._backlash_steppers()
+        if steppers and (steppers[0].travel_creep_rate > 0.
+                         or steppers[0]._creep_owed > 0.):
+            es = steppers[0]
+            # self.get_position() (NOT the raw chain) -- it undoes our own
+            # pending injection, the exact frame gcode_move's last_position
+            # is tracked in (gcode_move never re-reads it between two moves,
+            # so the frames must line up or the NEXT move misreads "de").
+            cur = self.get_position()
+            de = newpos[3] - cur[3]
+            newpos = list(newpos)
+            if abs(de) < .000001:
+                # Travel (E unchanged in gcode's frame). Maybe grow the debt,
+                # then ALWAYS re-apply the FULL current debt to translate
+                # gcode's frame into the chain's -- even when this specific
+                # move adds nothing new (already at the cap): the chain is
+                # still holding a past injection, and re-sending gcode's raw
+                # value untranslated would silently erase it (the bug the
+                # bench caught: a capped second travel snapped E back to 0).
+                if es.travel_creep_rate > 0.:
+                    dx, dy = newpos[0] - cur[0], newpos[1] - cur[1]
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist >= es.travel_creep_min_dist:
+                        creep = min(es.travel_creep_rate * dist,
+                                   es.travel_creep_max - es._creep_owed)
+                        if creep > 0.:
+                            es._creep_owed += creep
+                newpos[3] -= es._creep_owed
+            elif es._creep_owed > 0.:
+                # Any REAL E movement, extrude or retract -- settle the debt
+                # first rather than let it compound with the take-up's own
+                # offset. In practice this is almost always an extrude (the
+                # print resuming); a bare retract landing here means no
+                # extrusion happened between the travel and it, unlikely but
+                # handled the same way either direction.
+                newpos[3] += es._creep_owed
+                es._creep_owed = 0.
+        self._creep_old_transform.move(newpos, speed)
     def stats(self, eventtime):
         return self.heater.stats(eventtime)
     def check_move(self, move, ea_index):

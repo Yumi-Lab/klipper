@@ -20,6 +20,12 @@ cc -O2 -w -I klippy/chelper -o .loop/tmp/bl_overlap_bench \
     scripts/backlash_overlap_bench.c -lm
 .loop/tmp/bl_overlap_bench
 
+# Banc de correction du transform travel-creep (pure Python, aucun C) :
+# exerce les VRAIES methodes PrinterExtruder.move/get_position sur un objet
+# minimal, verifie les montants injectes/rembourses au chiffre pres.
+echo "== banc travel creep (scripts/travel_creep_bench.py) =="
+python3 scripts/travel_creep_bench.py
+
 # Harnais Klipper (simulateur) : necessite un .dict MCU compile (Lot 1 de
 # PROGRESS.md). Tant qu'il n'existe pas, on ne bloque PAS les autres lots
 # dessus -- on le saute avec un message clair plutot que d'echouer a chaque
@@ -53,7 +59,8 @@ else
                      test/klippy/pressure_advance.test test/klippy/extruders.test \
                      test/klippy/backlash_layer_change.test \
                      test/klippy/backlash_live_reconfig.test \
-                     test/klippy/backlash_drained_reconfig.test"
+                     test/klippy/backlash_drained_reconfig.test \
+                     test/klippy/travel_creep.test"
 fi
 
 echo "OK"
