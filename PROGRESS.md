@@ -531,3 +531,14 @@
   c'est le harnais klippy qui le couvre.
   Prochaine étape : Lot 8 — nouveau `.gate-handoff` (rejouer le cas FAIL du
   Lot 6 avec ce fix déployé) et STOP.
+
+- **2026-08-14 03:40Z — codeuse, Lot 8 : GATE PENDING.**
+  GATE PENDING: Lot 8 — pad 192.168.100.106, protocole complet dans
+  `.gate-handoff` : déployer `yumi-charge-essai` @ `3462da6` (fix Lot 7,
+  Python seul — kin_extruder.c inchangé), impression réelle active, appliquer
+  la config exacte du crash puis `SET_PRESSURE_ADVANCE BACKLASH_COEF=1.5` EN
+  DIRECT pendant le print (le cas exact du FAIL Lot 6), laisser imprimer
+  ≥ 15 min ; variantes COEF 1.5→1.0→0→1.0 si le print continue. PASS = aucun
+  « Invalid sequence » / « Internal error in stepcompress » jusqu'à la fin du
+  print. Les Lots 6 et 8 restent DÉCOCHÉS, pas de `.done`. Le verdict humain
+  revient via `.loop/inject.md` + suppression de `.gate-handoff`. STOP.
