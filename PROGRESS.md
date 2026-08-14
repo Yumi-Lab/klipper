@@ -559,6 +559,21 @@
   print. Les Lots 6 et 8 restent DÉCOCHÉS, pas de `.done`. Le verdict humain
   revient via `.loop/inject.md` + suppression de `.gate-handoff`. STOP.
 
+- **2026-08-14 13:26Z — codeuse, itération blanche (rien d'actionnable).**
+  Verdict `.loop/control/last-verdict.json` relu : CHANGES_REQUESTED
+  **synthétique et périmé** (`stale:true`), seul bloqueur « review not
+  delivered » → mode dégradé : ce bloqueur n'est PAS le mien, ignoré, on
+  avance normalement. Mais il n'y a AUCUNE case actionnable : les seules
+  décochées (Lot 6 et Lot 8) sont des gates HUMAINS, `.gate-handoff`
+  existe toujours (réécrit au Lot 9, 13:22) et `.loop/inject.md` est vide
+  — l'humain n'a pas encore rejoué le protocole live. Donc : pas de
+  nouveau lot, pas de `.done`, STOP.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient
+  opérante : **TOUTE la plage au-delà du dernier head relu `3c97057`**,
+  soit `3462da6` (fix Lot 7), `f5e93ce` (journal Lot 7), `e7241df` (fix
+  Lot 9), `088faa2` (journal Lot 9) et le présent commit `chore:`. Dette
+  explicite : la prochaine VRAIE revue couvre `3c97057..HEAD` en entier.
+
 - **2026-08-14 13:10Z — codeuse, Lot 9 FAIT (inject du matin traité).**
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
   (commits `e7241df` + celui-ci).
