@@ -115,11 +115,22 @@ class ExtruderStepper:
                                                  above=0.)
         self.travel_creep_min_dist = config.getfloat(
             'travel_creep_min_dist', 10., above=0.)
+        # YUMI: le rembourser d'un coup sur le tout premier mouvement extrudant
+        # pousse toute la dette en une fois -- si ce mouvement est court ou la
+        # tete bouge peu en XY, ca sort en boule avec la tete quasi immobile
+        # (Nicolas, 2026-08-14, vu en vrai). Etale sur cette distance
+        # d'extrusion REELLE, proportionnellement -- meme principe que
+        # BACKLASH_BLEED. 0 = remboursement instantane (comportement d'origine).
+        self.travel_creep_bleed = config.getfloat('travel_creep_bleed', 5.,
+                                                   minval=0.)
         # Mm actuellement injectes en trop, a rendre au prochain vrai mouvement
         # d'extrusion. Jamais persiste au-dela d'une session : au pire on perd
         # quelques diximes de mm de matiere a une pause/fin de print, jamais
         # une sur-extrusion.
         self._creep_owed = 0.
+        # Etat de l'etalement en cours (0 = pas de remboursement en cours).
+        self._creep_bleed_left = 0.
+        self._creep_bleed_total = 0.
         # Setup stepper
         self.stepper = stepper.PrinterStepper(config)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -193,6 +204,7 @@ class ExtruderStepper:
                 'travel_creep_rate': self.travel_creep_rate,
                 'travel_creep_max': self.travel_creep_max,
                 'travel_creep_min_dist': self.travel_creep_min_dist,
+                'travel_creep_bleed': self.travel_creep_bleed,
                 'travel_creep_owed': self._creep_owed,
                 'motion_queue': self.motion_queue}
     def note_extrude_dir(self, print_time, direction, dist=0.):
@@ -520,8 +532,11 @@ class ExtruderStepper:
                                above=0.)
         t_min = gcmd.get_float('TRAVEL_CREEP_MIN_DIST',
                                self.travel_creep_min_dist, above=0.)
+        t_bld = gcmd.get_float('TRAVEL_CREEP_BLEED', self.travel_creep_bleed,
+                               minval=0.)
         self.travel_creep_rate, self.travel_creep_max = t_rate, t_max
         self.travel_creep_min_dist = t_min
+        self.travel_creep_bleed = t_bld
         cur = (self.bowden_length, self.backlash_coef, self.backlash_speed,
                self.bowden_id, self.bowden_turns, self.backlash_accel,
                self.backlash_deduct, self.backlash_bleed,
@@ -566,6 +581,7 @@ class ExtruderStepper:
                "TRAVEL_CREEP_RATE: %.4f mm/mm (configurable)\n"
                "TRAVEL_CREEP_MAX: %.3f mm (configurable)\n"
                "TRAVEL_CREEP_MIN_DIST: %.1f mm (configurable)\n"
+               "TRAVEL_CREEP_BLEED: %.1f mm (configurable)\n"
                "backlash_play: %.3f mm (deduced)\n"
                "backlash_ramp: %.1f ms (deduced)"
                % (pressure_advance, smooth_time, cur_lead, self.bowden_length,
@@ -574,6 +590,7 @@ class ExtruderStepper:
                   self.backlash_deduct, self.backlash_bleed,
                   self.backlash_restart, self.travel_creep_rate,
                   self.travel_creep_max, self.travel_creep_min_dist,
+                  self.travel_creep_bleed,
                   self._backlash_play(), self._backlash_ramp() * 1000.))
         self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
         gcmd.respond_info(msg, log=False)
@@ -759,15 +776,52 @@ class PrinterExtruder:
                         if creep > 0.:
                             es._creep_owed += creep
                 newpos[3] -= es._creep_owed
-            elif es._creep_owed > 0.:
-                # Any REAL E movement, extrude or retract -- settle the debt
-                # first rather than let it compound with the take-up's own
-                # offset. In practice this is almost always an extrude (the
-                # print resuming); a bare retract landing here means no
-                # extrusion happened between the travel and it, unlikely but
-                # handled the same way either direction.
+            elif de < 0. and es._creep_owed > 0.:
+                # A retract lands here (rare -- no extrusion happened between
+                # the travel and it). Settle instantly: pulling BACK extra
+                # material has none of the "stationary head over-extrudes"
+                # risk the extrude side has, and the take-up's own retract
+                # already claims the full jeu in one move the same way.
                 newpos[3] += es._creep_owed
                 es._creep_owed = 0.
+                es._creep_bleed_left = 0.
+            elif de > 0. and es._creep_owed > 0.:
+                # Real extrusion resuming. Nicolas, 2026-08-14 (live test):
+                # repaying the FULL debt on this one move pushed it all
+                # through a SINGLE move -- if that move happens to be short
+                # or the head barely moves in XY (a dot, a short priming
+                # stroke), the extra material has nowhere to spread and comes
+                # out as a blob with the head nearly stationary. Spread the
+                # repayment instead, proportionally to REAL extrusion
+                # distance, over travel_creep_bleed mm -- same idea as
+                # BACKLASH_BLEED, but continuous (no C-side ramp available at
+                # this transform layer, so no fixed-palier quantization
+                # needed either: a plain per-move proportional share is
+                # already smooth here, since real moves are already many mm
+                # apart in a print). 0 (default) keeps the old instant
+                # behaviour for anyone who does not need this.
+                move_e_dist = de
+                if es.travel_creep_bleed > 0.:
+                    if es._creep_bleed_left <= 0.:
+                        # First move of a fresh repayment sequence: pin the
+                        # rate (owed-at-start / bleed distance) so it does
+                        # not drift as _creep_owed shrinks move by move.
+                        es._creep_bleed_left = es.travel_creep_bleed
+                        es._creep_bleed_total = es._creep_owed
+                    share = min(move_e_dist, es._creep_bleed_left)
+                    repay = (es._creep_bleed_total * share
+                            / es.travel_creep_bleed)
+                    es._creep_bleed_left -= move_e_dist
+                    if es._creep_bleed_left <= 0. or repay >= es._creep_owed:
+                        repay = es._creep_owed  # close out exactly, no
+                        es._creep_bleed_left = 0.  # float residue left owing
+                else:
+                    repay = es._creep_owed
+                newpos[3] += repay
+                es._creep_owed -= repay
+                if es._creep_owed <= 0.:
+                    es._creep_owed = 0.
+                    es._creep_bleed_left = 0.
         self._creep_old_transform.move(newpos, speed)
     def stats(self, eventtime):
         return self.heater.stats(eventtime)

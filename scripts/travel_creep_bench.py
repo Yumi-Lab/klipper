@@ -24,11 +24,14 @@ def check(label, cond, detail=''):
 
 
 class FakeStepper:
-    def __init__(self, rate=0., cap=1., min_dist=10.):
+    def __init__(self, rate=0., cap=1., min_dist=10., bleed=0.):
         self.travel_creep_rate = rate
         self.travel_creep_max = cap
         self.travel_creep_min_dist = min_dist
+        self.travel_creep_bleed = bleed  # 0 = instant repay (older cases below)
         self._creep_owed = 0.
+        self._creep_bleed_left = 0.
+        self._creep_bleed_total = 0.
 
 
 class FakeChain:
@@ -139,6 +142,60 @@ check('G repayment after accumulation: full owed added on top of the target',
       abs(pe._creep_old_transform.pos[3] - (3. + 0.75)) < 1e-9,
       'E=%.6f expected=%.6f' % (pe._creep_old_transform.pos[3], 3.75))
 check('G owed cleared after repayment', es._creep_owed == 0.)
+
+# --- Case H: repayment SPREADS over travel_creep_bleed mm, not dumped on
+# the first move -- the exact defect Nicolas caught live (2026-08-14): a
+# short/near-stationary first extruding move must NOT absorb the whole debt.
+es = FakeStepper(rate=0.01, cap=1., min_dist=10., bleed=5.)
+pe = make_extruder(es)
+pe.move([50., 0., 0., 0.], 3000.)   # long travel: owed = 0.5
+check('H setup: owed before repayment', abs(es._creep_owed - 0.5) < 1e-9)
+# First extruding move is SHORT (0.5mm E) and the head barely moves in XY --
+# exactly the "dot / short priming stroke" scenario. With bleed=5mm and
+# owed=0.5, the rate is 0.5/5 = 0.1 mm creep per mm of real extrusion.
+pe.move([50.2, 0., 0., 0.5], 1500.)  # gcode wants +0.5mm E, dist=0.5mm
+expected_repay_1 = 0.5 * (0.5 / 5.)  # 0.05
+check('H first (short) extrude move repays only its proportional share',
+      abs(pe._creep_old_transform.pos[3] - (0.5 + expected_repay_1)) < 1e-9,
+      'E=%.6f expected=%.6f' % (pe._creep_old_transform.pos[3],
+                                0.5 + expected_repay_1))
+check('H owed shrank by the same share, NOT to zero',
+      abs(es._creep_owed - (0.5 - expected_repay_1)) < 1e-9,
+      'owed=%.6f' % es._creep_owed)
+check('H bleed distance remaining tracked', abs(es._creep_bleed_left - 4.5) < 1e-9,
+      'left=%.6f' % es._creep_bleed_left)
+# Several more short extrude moves must fully clear the debt by the time
+# 5mm of real extrusion has passed, never overshoot it, and never leave a
+# floating-point residue owing forever.
+total_repaid = expected_repay_1
+e_pos = 0.5
+for _ in range(20):
+    e_pos += 0.3
+    pe.move([50.2, 0., 0., e_pos], 1500.)
+    total_repaid = 0.5 - es._creep_owed
+check('H after enough real extrusion, the WHOLE debt is repaid exactly',
+      es._creep_owed == 0., 'owed=%.6f' % es._creep_owed)
+check('H total repaid across all moves == what was originally owed',
+      abs(total_repaid - 0.5) < 1e-9, 'total=%.6f' % total_repaid)
+check('H bleed state reset once the debt clears',
+      es._creep_bleed_left == 0.)
+
+# --- Case I: bleed=0 keeps the OLD instant-repay behaviour (regression) ----
+es = FakeStepper(rate=0.01, cap=1., min_dist=10., bleed=0.)
+pe = make_extruder(es)
+pe.move([50., 0., 0., 0.], 3000.)
+pe.move([50.2, 0., 0., 0.5], 1500.)
+check('I bleed=0: full debt repaid on the very first extrude move',
+      es._creep_owed == 0., 'owed=%.6f' % es._creep_owed)
+
+# --- Case J: a retract with pending owed settles INSTANTLY even with bleed
+# configured -- no "stationary blob" risk on a retract, unlike an extrude.
+es = FakeStepper(rate=0.01, cap=1., min_dist=10., bleed=5.)
+pe = make_extruder(es)
+pe.move([50., 0., 0., 0.], 3000.)   # owed = 0.5
+pe.move([50., 0., 0., -1.], 6000.)  # a retract lands here instead of an extrude
+check('J retract with pending debt settles it all in one move',
+      es._creep_owed == 0., 'owed=%.6f' % es._creep_owed)
 
 # --- Case F: feature OFF (rate=0, default) -- byte-for-byte untouched ------
 es = FakeStepper(rate=0., cap=1., min_dist=10.)
