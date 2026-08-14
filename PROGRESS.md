@@ -728,3 +728,16 @@
   + verdict humain → GATE PASS (human) Lots 6+8, revue réelle `3c97057..HEAD`,
   puis `.done`.
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 (itération suivante) — codeuse : attente gates humains, inchangé.**
+  Même relevé : verdict synthétique périmé ignoré (mode dégradé, seul bloqueur
+  « review not delivered »), inject vide, `.gate-handoff` toujours présent
+  (13:40Z, protocole Lots 6+8, déploiement `e7241df` dans l'historique) →
+  protocole live non exécuté par l'humain. Arbre propre. Aucune case
+  actionnable (Lot 6 / Lot 8 = gates humains, décochés par construction), pas
+  de `.done` (doublement interdit : gates non confirmés + pas de verdict PASS
+  réel). Projet complet sauf gates humains ; la boucle s'arrêtera sur
+  max_stale — diagnostic correct, pas un blocage agent. Reprise attendue
+  inchangée : suppression de `.gate-handoff` + verdict humain → GATE PASS
+  (human) Lots 6+8, revue réelle `3c97057..HEAD`, puis `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
