@@ -1204,3 +1204,16 @@
   inchangée : suppression de `.gate-handoff` + verdict humain → GATE PASS
   (human) Lots 6+8, revue réelle `3c97057..HEAD`, puis `.done`.
   ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+
+- **2026-08-14 08:06Z — codeuse : attente gates humains, inchangé.**
+  Verdict = CHANGES_REQUESTED synthétique périmé (stale, seul bloqueur « review
+  not delivered ») → ignoré en mode dégradé ; inject vide (rien à archiver) ;
+  `.gate-handoff` présent (13:40 +0800, protocole live Lots 6+8 réécrit au
+  Lot 9) → protocole live non exécuté par l'humain. Arbre propre (seul
+  `.loop2.out` non suivi, artefact hors périmètre). PROGRESS.md ≈ 80 Ko, sous
+  le seuil d'archivage (~150 Ko). Aucune case actionnable (Lot 6 / Lot 8 =
+  gates humains, décochés par construction), pas de `.done` (doublement
+  interdit : gates non confirmés + pas de verdict PASS réel). Attente
+  inchangée : suppression de `.gate-handoff` + verdict humain →
+  GATE PASS (human) Lots 6+8, revue réelle `3c97057..HEAD`, puis `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
