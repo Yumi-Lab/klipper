@@ -1,0 +1,36 @@
+# YUMI: bowden backlash take-up -- LIVE reconfigure on a DRAINED queue.
+# Variant of backlash_live_reconfig.test: the SET_PRESSURE_ADVANCE lands when
+# the toolhead queue is EMPTY and fully generated (M400 just returned), with
+# the offset still at -play from a retract. The return-to-zero flip is then
+# stamped at the queue end with a window entirely BEHIND the flush head: no
+# move can carry the ramp, it is never generated, commanded_pos stays at
+# -play, and the reset wipes the model's memory of it -> the next extruding
+# move jumps by the whole play -> "Invalid sequence".
+# Investigation of 2026-08-14 (inject: the crash needs the conjunction of a
+# live reconfigure AND a flip near in time -- traced to this drained-queue
+# corner of _apply_backlash).
+DICTIONARY atmega2560.dict
+CONFIG backlash_layer_change.cfg
+
+G28
+G1 X20 Y20 Z1 F6000
+M83
+# Exact config of the live crash (first line applied long before the print)
+SET_PRESSURE_ADVANCE ADVANCE=0 SMOOTH_TIME=0 LEAD_TIME=0 BOWDEN_LENGTH=800 BACKLASH_COEF=1 BACKLASH_SPEED=40 BACKLASH_ACCEL=15000 BACKLASH_DEDUCT=0.5 BACKLASH_BLEED=10
+# Settle into forward extrusion, then a retraction: offset now at -play
+G1 X30 E2 F3000
+G1 E-1 F6000
+# DRAIN the queue: every move executed AND generated, nothing left to carry
+# a ramp. M400 alone is NOT enough: print_time still sits at the retract's
+# end, so the return flip's window would overlap the retract move itself and
+# ride it (generated, no hole). The G4 dwell detaches print_time from the
+# last move -- this is the state after an idle pause / M109 / end of print.
+M400
+G4 P2000
+# LIVE reconfigure with the offset still pending, play and ramp GROW
+# (play 1.571 -> 2.356 mm, ramp 58.9 -> 88.4 ms).
+SET_PRESSURE_ADVANCE BACKLASH_COEF=1.5
+# First extrusion after the reconfigure: on the buggy order the model says
+# offset 0 while commanded_pos is still -play -> jump of the whole play.
+G1 X40 E2 F3000
+M400

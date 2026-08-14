@@ -99,7 +99,7 @@ cale à l'impression, c'est sa raison d'être.
 
 ### Les arrêts machine rencontrés (et ce qui les a fixés)
 
-Six classes de crash « Internal error in stepcompress » / « Invalid sequence »
+Sept classes de crash « Internal error in stepcompress » / « Invalid sequence »
 rencontrées sur la couche de rattrapage, dans l'ordre. La règle d'or transversale :
 la position commandée doit rester **continue**, et toute fenêtre élargie exige une
 resync — deux propriétés à **imposer**, jamais à supposer.
@@ -153,6 +153,21 @@ resync — deux propriétés à **imposer**, jamais à supposer.
    `_last_ramp`, qui EST la fenêtre courante). Rouge sans le fix avec la
    signature exacte de production (`syncemitter 'extruder'` + « Invalid
    sequence »), vert avec.
+7. **Rampe de retour sans porteur** (repro `test/klippy/backlash_drained_reconfig.test`)
+   — le jalon de retour à zéro est posé à la fin de la file (`get_last_move_time`)
+   et sa rampe n'est émise que si un move **extrudant** la porte : itersolve ne
+   génère ce stepper que sur ses propres moves, ± la fenêtre de scan. Queue vide
+   ou drainée (pause, M109, G4, fin de print — tout moment où la reconfiguration
+   tombe loin du dernier move extrudant) : la rampe court dans le vide, n'est
+   jamais émise, `commanded_pos` reste décalé du jeu entier, et le `reset`
+   qui suivait perdait la mémoire de cet offset → le prochain move extrudant
+   sautait du jeu entier → « Invalid sequence ». Fix : `_apply_backlash` ne pose
+   le jalon de retour que si la fenêtre a un porteur (`_last_extrude_time`,
+   horodaté par `note_extrude_dir`) ; sinon **on ne pose rien et on ne reset
+   pas** — l'offset reste où il est et le prochain move extrudant le
+   re-jalonne avec les nouveaux paramètres, en continu par construction
+   (l'invariant de non-recouvrement de la cause 5 le garantit). Rouge sans le
+   fix avec la signature exacte de production, vert avec.
 
 ### Ce que fait lead_time
 - `lead_time` (config `[extruder]` ou `SET_PRESSURE_ADVANCE EXTRUDER=... LEAD_TIME=`)

@@ -109,6 +109,11 @@ class ExtruderStepper:
         # the planner only stamps real changes.
         self._backlash_target = 0.
         self._backlash_flips = 0
+        # print_time du dernier move EXTRUDANT vu par le planner : c'est lui
+        # (plus/moins la fenetre de scan) qui porte les pas d'une rampe de
+        # retour posee a la fin de la file. Sert a savoir si cette rampe a
+        # un porteur, cf. _apply_backlash.
+        self._last_extrude_time = 0.
         # Miroir des parametres DEJA ecrits cote C (dernier extruder_set_backlash
         # effectif) : la fenetre de scan active en C est max(hst, _c_ramp) tant
         # que _c_play > 0. Indispensable pour savoir, AVANT de poser un jalon,
@@ -171,6 +176,7 @@ class ExtruderStepper:
         # further back reads moves Klipper may already have freed.
         if not direction:
             return
+        self._last_extrude_time = print_time
         play = self._backlash_play()
         # A jeu nul on jalonne QUAND MEME, avec une cible de 0 : c'est ce jalon
         # qui ramene l'offset a zero par la rampe. Sortir ici laisserait le
@@ -272,6 +278,7 @@ class ExtruderStepper:
         # Corriger cas par cas n'a fait qu'ouvrir la porte suivante. On pose donc
         # le principe : la couche revient a zero PAR SA RAMPE, on attend que les
         # pas soient emis, et seulement ensuite on change ce qu'on veut.
+        deferred = False
         if self._backlash_target:
             # MAIS la rampe de retour doit tenir dans la fenetre de scan ACTIVE
             # en C au moment ou elle est generee. La poser avec la NOUVELLE
@@ -298,18 +305,42 @@ class ExtruderStepper:
                 ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
                 self._c_play, self._c_ramp = play, ramp
                 motion_queuing.check_step_generation_scan_windows()
-            ffi_lib.extruder_backlash_flip(self.sk_extruder,
-                                           toolhead.get_last_move_time(),
-                                           0., ramp)
-            self._backlash_target = 0.
-            toolhead.dwell(ramp)
+            t_r = toolhead.get_last_move_time()
+            if play > 0. and self._last_extrude_time < t_r - 2. * ramp:
+                # ...et il faut EN PLUS que la fenetre de la rampe contienne
+                # un move EXTRUDANT pas encore genere : itersolve ne genere
+                # ce stepper que sur ses propres moves (+/- la fenetre), donc
+                # sans porteur la rampe n'est JAMAIS emise quand bien meme
+                # elle tiendrait dans la fenetre. Queue vide ou drainee
+                # (pause, M109, G4, fin de print...) : la rampe posee a t_r
+                # court dans le vide, commanded_pos reste decale du jeu, et
+                # le reset ci-dessous perdrait la memoire de cet offset -> le
+                # prochain move extrudant sauterait du jeu entier
+                # ("Invalid sequence", repro backlash_drained_reconfig.test).
+                # On ne pose alors RIEN : l'offset reste ou il est et le
+                # prochain move extrudant le re-jalonne avec les NOUVEAUX
+                # parametres -- continu par construction, l'invariant de
+                # non-recouvrement impose a l'insertion le garantit (cf.
+                # extruder_backlash_flip). Le reset est saute lui aussi.
+                # Reserve au jeu NON NUL : a jeu nul la fenetre C retombe a
+                # hst (extruder_update_scan_window ignore backlash_ramp quand
+                # play==0) et l'offset en suspens ne pourrait plus etre
+                # genere du tout -- le retour par la rampe historique reste
+                # le bon chemin pour l'extinction.
+                deferred = True
+            else:
+                ffi_lib.extruder_backlash_flip(self.sk_extruder, t_r, 0., ramp)
+                self._backlash_target = 0.
+                toolhead.dwell(ramp)
         toolhead.flush_step_generation()
-        # Repartir d'un historique vierge : plus aucun jalon ne peut etre relu
-        # avec les nouveaux reglages.
-        ffi_lib.extruder_backlash_reset(self.sk_extruder)
-        self._backlash_target = 0.
-        self._restart_base = 0.
-        self._bleed_left = 0.
+        if not deferred:
+            # Repartir d'un historique vierge : plus aucun jalon ne peut etre
+            # relu avec les nouveaux reglages.
+            ffi_lib.extruder_backlash_reset(self.sk_extruder)
+            self._backlash_target = 0.
+            self._restart_base = 0.
+            self._bleed_left = 0.
+            self._last_extrude_time = 0.
         ffi_lib.extruder_set_backlash(self.sk_extruder, play, ramp)
         self._c_play, self._c_ramp = play, ramp
         if ramp > 0.:
@@ -327,7 +358,11 @@ class ExtruderStepper:
         motion_queuing.check_step_generation_scan_windows()
         # Le prochain mouvement re-jalonne la cible avec le NOUVEAU jeu : c'est
         # ce jalon qui fait redescendre (ou remonter) l'offset en douceur.
-        self._backlash_target = None
+        # En mode differe (queue sans porteur), on GARDE la cible courante :
+        # elle decrit l'offset physiquement en cours, et c'est le jalon pose
+        # par le prochain move extrudant qui le ramenera -- en continu.
+        if not deferred:
+            self._backlash_target = None
     def _cur_lead(self):
         mq = self.printer.lookup_object('motion_queuing')
         return mq.get_trapq_lead(self.stepper.get_trapq())
