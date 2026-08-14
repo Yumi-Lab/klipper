@@ -667,3 +667,21 @@
   conclusion produit tirée de ces runs.
   Prochaine étape : gate humain (`.gate-handoff` réécrit : cas Lot 8 + cas
   drainé Lot 9, déploiement `e7241df`) puis STOP.
+
+- **2026-08-14 05:31Z — codeuse : attente gates humains, aucune case actionnable.**
+  Verdict `.loop/control/last-verdict.json` = CHANGES_REQUESTED synthétique
+  périmé (stale), unique blocker « review not delivered » → mode dégradé :
+  ce blocker n'est pas à traiter, avancement normal. Canal inject vide.
+  État : toutes les cases cochables sont cochées (Lots 0-5, 7, 9 avec PROOF au
+  Journal). Il ne reste QUE les deux gates humains : Lot 6 (test live du fix
+  fenêtre de scan) et Lot 8 (rejeu live changement de couche dense + cas
+  drainé Lot 9). `.gate-handoff` est TOUJOURS présent (protocole réécrit à
+  13:22Z hier, déploiement `e7241df`) → l'humain n'a pas encore exécuté le
+  protocole : aucune case ne peut être cochée, pas de `.done` (de plus,
+  mode dégradé : `.done` interdit tant qu'il n'y a pas un verdict PASS RÉEL).
+  Diagnostic correct pour l'arrêt de la boucle : **projet complet sauf les
+  gates humains** (la boucle s'arrêtera sur max_stale — c'est l'attente
+  normale du protocole live, pas un blocage agent). Reprise attendue :
+  suppression de `.gate-handoff` + verdict humain → cocher Lot 6 / Lot 8
+  (GATE PASS (human)), puis verdict de revue réel, puis `.done`.
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
