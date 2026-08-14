@@ -74,6 +74,22 @@
       Rouge sans le fix (signature exacte de production), vert avec, 4/4
       harnais + banc verts, `YUMI_PATCHES.md` 6ᵉ cause ajoutée.
 
+- [x] **Lot 9 — reconfiguration live sur queue DRAINÉE (offset en suspens).**
+      ✅ FAIT (voir Journal 2026-08-14 13:10Z) : suite à l'inject qui réfutait
+      l'hypothèse "changement pendant print = crash" et demandait de creuser
+      la conjonction avec un flip réel — le cas "flip physiquement en cours"
+      est SÛR (tracé, voir Journal), mais la trace a révélé le trou adjacent :
+      le jalon de retour à zéro posé à la fin de la file n'est émis que si un
+      move EXTRUDANT porte sa rampe ; queue vide/drainée (pause, M109, G4,
+      fin de print) → rampe jamais émise, `commanded_pos` décalé du jeu,
+      reset en perd la mémoire → saut au prochain move extrudant. Reproduit
+      en harnais (`test/klippy/backlash_drained_reconfig.test`, rouge sans le
+      fix avec la signature exacte), fixé (Python seul : ne rien poser ni
+      resetter sans porteur — le prochain move extrudant re-jalonne en
+      continu ; réservé au jeu NON NUL car à jeu nul la fenêtre C retombe à
+      hst et l'offset en suspens ne serait plus générable), vert avec, 5/5
+      harnais + banc, YUMI_PATCHES.md 7ᵉ cause.
+
 - [ ] **Lot 8 — GATE HUMAIN n°2 (matériel réel).** Rejouer sur le pad le cas
       qui a fait FAIL au Lot 6, avec le fix Lot 7 déployé : impression active
       + `SET_PRESSURE_ADVANCE BACKLASH_COEF=1.5` en direct, puis poursuivre
@@ -542,3 +558,97 @@
   « Invalid sequence » / « Internal error in stepcompress » jusqu'à la fin du
   print. Les Lots 6 et 8 restent DÉCOCHÉS, pas de `.done`. Le verdict humain
   revient via `.loop/inject.md` + suppression de `.gate-handoff`. STOP.
+
+- **2026-08-14 13:10Z — codeuse, Lot 9 FAIT (inject du matin traité).**
+  ⚠ NON RELU (revue en panne) — à repasser quand la revue redevient opérante
+  (commits `e7241df` + celui-ci).
+
+  **Réponse à la question posée par l'inject** (« que se passe-t-il dans
+  `_apply_backlash()` quand un flip est PHYSIQUEMENT en cours de génération ? »)
+  : ce cas-là est SÛR, tracé en code, pas supposé. Tant que la file est
+  alimentée, `_handle_step_flush` (toolhead.py:310) maintient la génération à
+  `kin_flush_delay` derrière la fin de file, et depuis le Lot 7 la fenêtre est
+  élargie AVANT l'insertion (`kfd ≥ rampe_nouvelle`) → le début de fenêtre du
+  jalon de retour (`T_R − rampe`) ne peut pas passer derrière la tête de flush.
+  Si le flip réel est à mi-rampe (`H` dans sa fenêtre), la fusion du Lot 3
+  (extruder_backlash_flip, branche raccourcissement) borne exactement ce cas.
+  La conjonction « flip proche » n'est donc pas le facteur manquant.
+
+  **Mais la trace a révélé le trou adjacent, reproduit** : le jalon de retour
+  est posé à `get_last_move_time()` SANS vérifier qu'un move extrudant porte sa
+  rampe — itersolve ne génère ce stepper que sur ses propres moves ± fenêtre.
+  Queue drainée (M400/M109/G4/fin de print, offset en suspens à −jeu) : la
+  rampe court dans le vide, jamais émise, `commanded_pos` reste à −jeu, le
+  `extruder_backlash_reset` qui suivait perdait la mémoire de l'offset → saut
+  du jeu entier au prochain move extrudant. Note harnais : M400 seul ne
+  suffit PAS à créer l'état — `print_time` reste sur la fin du retrait, la
+  fenêtre recouvre alors le retrait lui-même (porteuse, générée, pas de trou) ;
+  il faut un `G4` pour détacher `print_time` du dernier move.
+
+  FIX (`e7241df`, Python seul, kin_extruder.c inchangé) : `_apply_backlash` ne
+  pose le jalon de retour que si `_last_extrude_time` (horodaté par
+  note_extrude_dir) ≥ `T_R − 2·rampe` ; sinon rien n'est posé et le reset est
+  sauté — l'offset reste, le prochain move extrudant le re-jalonne avec les
+  nouveaux paramètres, continu par construction. Différé réservé au jeu NON
+  NUL : la 1ʳᵉ version (différé aussi à jeu nul) a CASSÉ le COEF=0 final de
+  backlash_layer_change.test (Invalid sequence, c=8) — à jeu nul la fenêtre C
+  retombe à hst (`update_scan_window` ignore la rampe quand play==0) et
+  l'offset en suspens devient ingénérable ; le harnais l'a attrapé avant
+  commit. Résiduel connu et documenté : extinction (jeu→0) sur queue drainée
+  avec offset en suspens garde le chemin historique (non fixé — exigerait une
+  fenêtre C maintenue sans jeu, changement C + recompilation du .so ; niche).
+
+  PROOF 1 — ROUGE sans le fix (HEAD `f5e93ce` + seul le fichier de test, fix
+  pas encore appliqué ; instrumentation printf/log temporaire, retirée avant
+  commit — elle n'altère pas le comportement) :
+  cmd exacte :
+  `docker run --rm -e HOME=/tmp -v "$PWD:/src" -w /src python@sha256:dd4fe98ab39f91e936f8e7e7a65a3ce59ecfb11e32f9a125b3132779920ba7f7 bash -c "pip install -q greenlet==3.5.5 cffi==2.1.1 pyserial==3.5 jinja2==3.1.6 && python scripts/test_klippy.py -d dict test/klippy/backlash_drained_reconfig.test"`
+  sortie réelle (lignes clés) :
+  ```
+  YUMIDBG flip t=80.8528 target=0.0000 ramp=0.0884 flush=78.5732 last_t=78.8355 last_target=-1.5708
+  YUMIDBG reset flush=78.9117
+  b'stepcompress o=9 i=0 c=63 a=0: Invalid sequence'
+  b"Error in syncemitter 'extruder' step generation"
+  Test case test/klippy/backlash_drained_reconfig.test FAILED (Error during test)!
+  ```
+  critère numérique : test FAILED, signature IDENTIQUE à la production ; la
+  trace montre le jalon de retour posé à t=80,8528 avec fenêtre
+  [80,7644, 80,8528] SANS aucun move extrudant (dernier move extrudant finit à
+  ~78,85) puis le reset qui efface la mémoire de l'offset → c=63 pas au même
+  instant au move suivant.
+
+  PROOF 2 — VERT avec le fix + zéro régression (`./verify.sh` complet, HEAD
+  `e7241df`) :
+  cmd exacte : `./verify.sh`
+  sortie réelle (dernières lignes, log complet `.loop/tmp/verify-lot9.log`) :
+  ```
+  seuil (meme run) = 1.00 pas  (4x controle B=0.16, plancher 1)
+  CONTINUITE OK : tous les cas sous le seuil.
+      Starting test/klippy/backlash_drained_reconfig.test (backlash_layer_change.cfg)
+      All 5 test cases passed
+  OK
+  rc=0
+  ```
+  critère : rc=0 ; py_compile + gcc -fsyntax-only (6 warnings
+  `externally_visible` préexistants) + banc 5 cas sous seuil + 5/5 klippy dans
+  l'image épinglée, dont backlash_layer_change (le COEF=0 final qui a attrapé
+  la régression du différé-à-jeu-nul) et live_reconfig (Lot 7, toujours vert).
+  attribution : repo HEAD `e7241df` ; hôte macOS 15.2 arm64 (Darwin 24.2.0),
+  Apple clang 16.0.0, -O2 banc ; harnais image python épinglée + pips épinglés ;
+  dict `dict/atmega2560.dict` (Lot 1) ; date 2026-08-14T13:10Z.
+  VARIED: `_apply_backlash` (différé sans porteur) / HELD FIXED: C, dict,
+  scénarios des lots précédents, hôte.
+  WHAT THIS DOES NOT SAY: simulateur, pas la machine ; le harnais ne reproduit
+  pas la sous-variante « fenêtre partiellement DÉJÀ générée » (tête de flush
+  dans la fenêtre du jalon de retour, famine de file < rampe en plein print —
+  la génération du harnais traîne trop en mode batch) ; le différé est borné
+  par le DÉBUT du dernier move extrudant (pas sa fin, inconnue de
+  note_extrude_dir) → des queues pourtant servables basculent en différé
+  (sûr, juste plus tardif) ; la validation matérielle reste le gate humain.
+  Note harnais (contamination) : deux runs verify concourants + un conteneur
+  zombie partageaient `_test_.*` via /src → blocages/faux échecs
+  (`_test_.log` manquant, ModuleNotFoundError quand pip oublié dans un run
+  d'isolation) — classés HARNESS_ERROR, éliminés par nettoyage, aucune
+  conclusion produit tirée de ces runs.
+  Prochaine étape : gate humain (`.gate-handoff` réécrit : cas Lot 8 + cas
+  drainé Lot 9, déploiement `e7241df`) puis STOP.
