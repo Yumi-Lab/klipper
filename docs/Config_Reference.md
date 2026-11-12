@@ -3508,6 +3508,31 @@ pin:
 #   containing the letters R, G, B, W with W optional). Alternatively,
 #   this may be a comma separated list of pixel orders - one for each
 #   LED in the chain. The default is GRB.
+#pulse_short_time:
+#pulse_long_time:
+#bit_time:
+#   The duration (in seconds) of the high pulse of a "zero" bit, of
+#   the high pulse of a "one" bit, and the minimum time between the
+#   start of two bits. Some LED drivers do not decode the default
+#   pulses (for example, the FW1903 was measured to need
+#   pulse_short_time: 0.000000550, pulse_long_time: 0.000001100 and
+#   bit_time: 0.000001650). The micro-controller must be flashed with
+#   a firmware that supports these options, and they have no effect
+#   on AVR micro-controllers. The default is to use the standard
+#   WS2812 timing of the micro-controller code.
+#bit_max_time: 0.000004
+#   The maximum time (in seconds) between the start of two bits. The
+#   micro-controller aborts and retries a transmission when an
+#   interrupt delays a bit beyond this time. A pulse_short_time of
+#   0.000000500 or more keeps interrupts disabled longer and needs a
+#   larger value (0.000008 was measured to work with the FW1903). The
+#   default is 0.000004.
+#reset_time: 0.000050
+#   The minimum time (in seconds) the data line is held low between
+#   two transmissions so that the LEDs latch the data. Some LED
+#   drivers require more than the default (the FW1903 requires
+#   0.000200, the WS2812B V5 requires 0.000280). The default is
+#   0.000050.
 #initial_RED: 0.0
 #initial_GREEN: 0.0
 #initial_BLUE: 0.0
