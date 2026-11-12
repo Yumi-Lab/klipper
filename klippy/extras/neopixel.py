@@ -10,6 +10,10 @@ BACKGROUND_PRIORITY_CLOCK = 0x7fffffff00000000
 
 BIT_MAX_TIME=.000004
 RESET_MIN_TIME=.000050
+RESET_MAX_TIME=.001
+BIT_MAX_LIMIT=.000050  # a longer low time latches the frame on every driver
+# Optional pulse timing overrides, in the order of the mcu command
+TIMING_OPTIONS = ('pulse_short_time', 'pulse_long_time', 'bit_time')
 
 MAX_MCU_SIZE = 500  # Sanity check on LED chain length
 
@@ -39,6 +43,20 @@ class PrinterNeoPixel:
         self.color_map = list(enumerate(color_indexes))
         if len(self.color_map) > MAX_MCU_SIZE:
             raise config.error("neopixel chain too long")
+        # Optional timing overrides (a zero keeps the mcu default)
+        self.bit_max_time = config.getfloat(
+            'bit_max_time', BIT_MAX_TIME, minval=BIT_MAX_TIME,
+            maxval=BIT_MAX_LIMIT)
+        self.timing = [config.getfloat(name, 0., minval=0.,
+                                       maxval=self.bit_max_time)
+                       for name in TIMING_OPTIONS]
+        set_timing = [t for t in self.timing if t]
+        if set_timing != sorted(set(set_timing)):
+            raise config.error("neopixel timing must satisfy %s"
+                               % (" < ".join(TIMING_OPTIONS),))
+        self.reset_time = config.getfloat(
+            'reset_time', RESET_MIN_TIME, minval=RESET_MIN_TIME,
+            maxval=RESET_MAX_TIME)
         # Initialize color data
         self.led_helper = led.LEDHelper(config, self.update_leds, chain_count)
         self.color_data = bytearray(len(self.color_map))
@@ -47,12 +65,22 @@ class PrinterNeoPixel:
         # Register callbacks
         printer.register_event_handler("klippy:connect", self.send_data)
     def build_config(self):
-        bmt = self.mcu.seconds_to_clock(BIT_MAX_TIME)
-        rmt = self.mcu.seconds_to_clock(RESET_MIN_TIME)
+        bmt = self.mcu.seconds_to_clock(self.bit_max_time)
+        rmt = self.mcu.seconds_to_clock(self.reset_time)
         self.mcu.add_config_cmd("config_neopixel oid=%d pin=%s data_size=%d"
                                 " bit_max_ticks=%d reset_min_ticks=%d"
                                 % (self.oid, self.pin, len(self.color_data),
                                    bmt, rmt))
+        if any(self.timing):
+            ticks = [self.mcu.seconds_to_clock(t) for t in self.timing]
+            for name, t, tick in zip(TIMING_OPTIONS, self.timing, ticks):
+                if t and not tick:
+                    raise self.printer.config_error(
+                        "neopixel %s=%.9f is shorter than one mcu clock tick"
+                        % (name, t))
+            self.mcu.add_config_cmd(
+                "neopixel_set_timing oid=%d short_ticks=%d long_ticks=%d"
+                " bit_ticks=%d" % ((self.oid,) + tuple(ticks)))
         cmd_queue = self.mcu.alloc_command_queue()
         self.neopixel_update_cmd = self.mcu.lookup_command(
             "neopixel_update oid=%c pos=%hu data=%*s", cq=cmd_queue)
